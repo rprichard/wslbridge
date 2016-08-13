@@ -1,0 +1,6 @@
+*               text=auto
+Makefile        text
+.gitattributes  text
+.gitignore      text
+*.cc            text
+*.h             text
