@@ -114,11 +114,25 @@ static std::string randomString() {
 static std::wstring mbsToWcs(const std::string &s) {
     const size_t len = mbstowcs(nullptr, s.c_str(), 0);
     if (len == static_cast<size_t>(-1)) {
-        assert(false && "mbsToWcs: invalid string");
+        fprintf(stderr, "error: mbsToWcs: invalid string\n");
+        exit(1);
     }
     std::wstring ret;
     ret.resize(len);
     const size_t len2 = mbstowcs(&ret[0], s.c_str(), len);
+    assert(len == len2);
+    return ret;
+}
+
+static std::string wcsToMbs(const std::wstring &s) {
+    const size_t len = wcstombs(nullptr, s.c_str(), 0);
+    if (len == static_cast<size_t>(-1)) {
+        fprintf(stderr, "error: wcsToMbs: invalid string\n");
+        exit(1);
+    }
+    std::string ret;
+    ret.resize(len);
+    const size_t len2 = wcstombs(&ret[0], s.c_str(), len);
     assert(len == len2);
     return ret;
 }
@@ -560,6 +574,51 @@ static void appendBashArg(std::wstring &out, const std::wstring &arg) {
     enterQuote(false);
 }
 
+static std::string errorMessageToString(DWORD err) {
+    // Use FormatMessageW rather than FormatMessageA, because we want to use
+    // wcstombs to convert to the Cygwin locale, which might not match the
+    // codepage FormatMessageA would use.  We need to convert using wcstombs,
+    // rather than print using %ls, because %ls doesn't work in the original
+    // MSYS.
+    wchar_t *wideMsgPtr = NULL;
+    const DWORD formatRet = FormatMessageW(
+        FORMAT_MESSAGE_FROM_SYSTEM |
+            FORMAT_MESSAGE_ALLOCATE_BUFFER |
+            FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        err,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        reinterpret_cast<wchar_t*>(&wideMsgPtr),
+        0,
+        NULL);
+    if (formatRet == 0 || wideMsgPtr == NULL) {
+        return std::string();
+    }
+    std::string msg = wcsToMbs(wideMsgPtr);
+    LocalFree(wideMsgPtr);
+    const size_t pos = msg.find_last_not_of(" \r\n\t");
+    if (pos == std::string::npos) {
+        msg.clear();
+    } else {
+        msg.erase(pos + 1);
+    }
+    return msg;
+}
+
+static std::string formatErrorMessage(DWORD err) {
+    char buf[64];
+    sprintf(buf, "error %#x", static_cast<unsigned int>(err));
+    std::string ret = errorMessageToString(err);
+    if (ret.empty()) {
+        ret += buf;
+    } else {
+        ret += " (";
+        ret += buf;
+        ret += ")";
+    }
+    return ret;
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -649,7 +708,11 @@ int main(int argc, char *argv[]) {
         false,
         CREATE_NO_WINDOW,
         nullptr, nullptr, &sui, &pi);
-    assert(success && "CreateProcess failed");
+    if (!success) {
+        fprintf(stderr, "error starting bash.exe adapter: %s\n",
+            formatErrorMessage(GetLastError()).c_str());
+        exit(1);
+    }
 
     // If the backend process exits before the frontend, then something has
     // gone wrong.
