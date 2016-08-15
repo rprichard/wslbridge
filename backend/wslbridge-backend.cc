@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pty.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -12,17 +13,15 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "../common/SocketIo.h"
 
 namespace {
-
-static WakeupFd g_wakeupFd;
-
-static void sigChldHandler(int signo) {
-    g_wakeupFd.set();
-}
 
 static int connectSocket(int port, const std::string &key) {
     const int s = socket(AF_INET, SOCK_STREAM, 0);
@@ -65,112 +64,133 @@ static Child spawnChild(int cols, int rows) {
     return Child { pid, masterfd };
 }
 
-static void mainLoop(int controlSocketFd, int dataSocketFd, Child child) {
+struct IoLoop {
+    std::mutex windowMutex;
+    std::condition_variable windowIncrease;
+    std::atomic<int32_t> window = {0};
+    int controlSocketFd = -1;
+    int childFd = -1;
+};
 
-    ControlSocket controlSocket(controlSocketFd);
-    IoChannel socketToChild(dataSocketFd, child.masterfd);
-    IoChannel childToSocket(child.masterfd, dataSocketFd);
+static void writePacket(IoLoop &ioloop, const Packet &p) {
+    if (!writeAllRestarting(ioloop.controlSocketFd,
+            reinterpret_cast<const char*>(&p), sizeof(p))) {
+        connectionBrokenAbort();
+    }
+}
 
-    fd_set readfds;
-    fd_set writefds;
-    FD_ZERO(&readfds);
-    FD_ZERO(&writefds);
+static void socketToPtyThread(IoLoop *ioloop, int socketFd) {
+    std::array<char, 8192> buf;
+    while (true) {
+        const ssize_t amt1 = readRestarting(socketFd, buf.data(), buf.size());
+        if (amt1 <= 0) {
+            // The data socket may have been shutdown, so ignore this
+            // situation.
+            break;
+        }
+        // If the child process exits, this write could fail.  In that case,
+        // ignore the failure, but continue to flush I/O from the pty.
+        writeAllRestarting(ioloop->childFd, buf.data(), amt1);
+    }
+}
 
-    childToSocket.setWindow(kBackendToFrontendWindow);
-
-    bool childReaped = false;
-
-    while (!controlSocket.hasFailed()) {
-        int maxfd = -1;
-        controlSocket.prepareForSelect(maxfd, &readfds, &writefds);
-        socketToChild.prepareForSelect(maxfd, &readfds, &writefds);
-        childToSocket.prepareForSelect(maxfd, &readfds, &writefds);
-        FD_SET(g_wakeupFd.readFd(), &readfds);
-        maxfd = std::max(maxfd, g_wakeupFd.readFd());
-        assert(maxfd != -1);
-
-        const int status = select(maxfd + 1, &readfds, &writefds, nullptr, nullptr);
-        if (status < 0) {
-            if (errno != EINTR) {
-                perror("select failed");
-                exit(1);
-            }
-        } else {
-            controlSocket.serviceIo(&readfds, &writefds);
-            socketToChild.serviceIo(&readfds, &writefds);
-            childToSocket.serviceIo(&readfds, &writefds);
-
-            if (FD_ISSET(g_wakeupFd.readFd(), &readfds)) {
-                if (!childReaped) {
-                    int exitStatus = 0;
-                    if (waitpid(child.pid, &exitStatus, 0) != child.pid) {
-                        perror("waitpid failed");
-                        exit(1);
-                    }
-                    if (WIFEXITED(exitStatus)) {
-                        exitStatus = WEXITSTATUS(exitStatus);
+static void ptyToSocketThread(IoLoop *ioloop, int socketFd) {
+    std::array<char, 32 * 1024> buf;
+    int32_t locWindow = kOutputWindowSize;
+    const int32_t kThreshold = kOutputWindowSize / 4;
+    while (true) {
+        if (locWindow < kThreshold) {
+            locWindow += ioloop->window.exchange(0);
+            if (locWindow < kThreshold) {
+                std::unique_lock<std::mutex> lock(ioloop->windowMutex);
+                while (true) {
+                    locWindow += ioloop->window.exchange(0);
+                    if (locWindow < kThreshold) {
+                        ioloop->windowIncrease.wait(lock);
                     } else {
-                        // XXX: I'm just making something up here.  I've got
-                        // no idea whether this makes sense.
-                        exitStatus = 1;
+                        break;
                     }
-                    childReaped = true;
-                    Packet p = {};
-                    p.type = Packet::Type::ChildExitStatus;
-                    p.u.exitStatus = exitStatus;
-                    controlSocket.write(&p, sizeof(p));
                 }
-                g_wakeupFd.clear();
             }
         }
-
-        for (int fd = 0; fd <= maxfd; ++fd) {
-            FD_CLR(fd, &readfds);
-            FD_CLR(fd, &writefds);
+        const ssize_t amt1 =
+            readRestarting(ioloop->childFd, buf.data(),
+                std::min<size_t>(buf.size(), locWindow));
+        if (amt1 <= 0) {
+            // The pty has closed.  Shutdown I/O on the data socket to signal
+            // I/O completion to the frontend.
+            shutdown(socketFd, SHUT_RDWR);
+            break;
         }
+        if (!writeAllRestarting(socketFd, buf.data(), amt1)) {
+            connectionBrokenAbort();
+        }
+        locWindow -= amt1;
+    }
+}
 
-        while (controlSocket.size() >= sizeof(Packet)) {
-            Packet p = {};
-            controlSocket.read(&p, sizeof(p));
-            switch (p.type) {
-                case Packet::Type::SetSize: {
-                    winsize ws = {};
-                    ws.ws_col = p.u.size.first;
-                    ws.ws_row = p.u.size.second;
-                    ioctl(child.masterfd, TIOCSWINSZ, &ws);
-                    break;
-                }
-                case Packet::Type::IncreaseWindow:
-                    childToSocket.increaseWindow(p.u.amount);
-                    break;
-                default:
-                    break;
+static void handlePacket(IoLoop *ioloop, const Packet &p) {
+    switch (p.type) {
+        case Packet::Type::SetSize: {
+            winsize ws = {};
+            ws.ws_col = p.u.termSize.cols;
+            ws.ws_row = p.u.termSize.rows;
+            ioctl(ioloop->childFd, TIOCSWINSZ, &ws);
+            break;
+        }
+        case Packet::Type::IncreaseWindow: {
+            {
+                std::lock_guard<std::mutex> guard(ioloop->windowMutex);
+                ioloop->window += p.u.windowAmount;
             }
+            ioloop->windowIncrease.notify_one();
+            break;
         }
-
-        if (socketToChild.bytesWritten() >= kFrontendToBackendWindow / 2) {
-            Packet p = {};
-            p.type = Packet::Type::IncreaseWindow;
-            p.u.amount = socketToChild.bytesWritten();
-            socketToChild.resetBytesWritten();
-            controlSocket.write(&p, sizeof(p));
-        }
-
-        if (childToSocket.hasReadFailed() && childToSocket.isBufferEmpty()) {
-            shutdown(dataSocketFd, SHUT_RDWR);
+        default: {
+            fprintf(stderr, "internal error: unexpected packet %d\n",
+                static_cast<int>(p.type));
+            exit(1);
         }
     }
+}
+
+static void mainLoop(int controlSocketFd, int dataSocketFd, Child child) {
+    IoLoop ioloop;
+    ioloop.controlSocketFd = controlSocketFd;
+    ioloop.childFd = child.masterfd;
+    std::thread s2p(socketToPtyThread, &ioloop, dataSocketFd);
+    std::thread p2s(ptyToSocketThread, &ioloop, dataSocketFd);
+    std::thread rcs(readControlSocketThread<IoLoop, handlePacket>, controlSocketFd, &ioloop);
+
+    // Block until the child process finishes, then notify the frontend of
+    // child exit.
+    int exitStatus = 0;
+    if (waitpid(child.pid, &exitStatus, 0) != child.pid) {
+        perror("waitpid failed");
+        exit(1);
+    }
+    if (WIFEXITED(exitStatus)) {
+        exitStatus = WEXITSTATUS(exitStatus);
+    } else {
+        // XXX: I'm just making something up here.  I've got
+        // no idea whether this makes sense.
+        exitStatus = 1;
+    }
+    Packet p = { Packet::Type::ChildExitStatus };
+    p.u.exitStatus = exitStatus;
+    writePacket(ioloop, p);
+
+    // Ensure that the parent thread outlives its child threads.  The program
+    // should exit before these threads finish.
+    s2p.join();
+    p2s.join();
+    rcs.join();
 }
 
 } // namespace
 
 int main(int argc, char *argv[]) {
     assert(argc == 6);
-
-    struct sigaction sa = {};
-    sa.sa_handler = sigChldHandler;
-    sa.sa_flags = SA_RESTART;
-    ::sigaction(SIGCHLD, &sa, nullptr);
 
     const int controlSocketPort = atoi(argv[1]);
     const int dataSocketPort = atoi(argv[2]);
@@ -183,8 +203,6 @@ int main(int argc, char *argv[]) {
 
     const auto child = spawnChild(cols, rows);
 
-    setSocketNonblocking(controlSocket);
-    setSocketNonblocking(dataSocket);
     mainLoop(controlSocket, dataSocket, child);
 
     return 0;

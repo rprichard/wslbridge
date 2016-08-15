@@ -15,8 +15,11 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include <utility>
+#include <array>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <utility>
 
 #include "../common/SocketIo.h"
 
@@ -30,13 +33,11 @@ namespace {
 
 static WakeupFd g_wakeupFd;
 
-static void terminalResized(int signo) {
-    g_wakeupFd.set();
-}
-
 static void registerResizeSignalHandler() {
     struct sigaction sa = {};
-    sa.sa_handler = terminalResized;
+    sa.sa_handler = [](int signo) {
+        g_wakeupFd.set();
+    };
     sa.sa_flags = SA_RESTART;
     ::sigaction(SIGWINCH, &sa, nullptr);
 }
@@ -44,7 +45,7 @@ static void registerResizeSignalHandler() {
 static TermSize terminalSize() {
     winsize ws = {};
     ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
-    return std::make_pair(ws.ws_col, ws.ws_row);
+    return TermSize { ws.ws_col, ws.ws_row };
 }
 
 class Socket {
@@ -221,98 +222,105 @@ static void restoreTerminalMode(const SavedTermiosMode &original) {
     }
 }
 
-static int mainLoop(int controlSocketFd, int dataSocketFd, TermSize termSize) {
-
-    ControlSocket controlSocket(controlSocketFd);
-    IoChannel parentToSocket(STDIN_FILENO, dataSocketFd);
-    IoChannel socketToParent(dataSocketFd, STDOUT_FILENO);
-
-    fd_set readfds;
-    fd_set writefds;
-    FD_ZERO(&readfds);
-    FD_ZERO(&writefds);
-
-    parentToSocket.setWindow(kFrontendToBackendWindow);
-
+struct IoLoop {
+    std::mutex mutex;
+    bool ioFinished = false;
+    int controlSocketFd = -1;
     bool childReaped = false;
     int childExitStatus = -1;
+};
 
-    while (!controlSocket.hasFailed() &&
-            !parentToSocket.hasReadFailed() &&
-            !socketToParent.hasWriteFailed()) {
-        int maxfd = -1;
-        controlSocket.prepareForSelect(maxfd, &readfds, &writefds);
-        socketToParent.prepareForSelect(maxfd, &readfds, &writefds);
-        parentToSocket.prepareForSelect(maxfd, &readfds, &writefds);
-        assert(maxfd != -1);
+static void writePacket(IoLoop &ioloop, const Packet &p) {
+    std::lock_guard<std::mutex> guard(ioloop.mutex);
+    if (!writeAllRestarting(ioloop.controlSocketFd,
+            reinterpret_cast<const char*>(&p), sizeof(p))) {
+        connectionBrokenAbort();
+    }
+}
 
-        FD_SET(g_wakeupFd.readFd(), &readfds);
-        maxfd = std::max(maxfd, g_wakeupFd.readFd());
-
-        const int status = select(maxfd + 1, &readfds, &writefds, nullptr, nullptr);
-        if (status < 0) {
-            if (errno != EINTR) {
-                perror("select failed");
-                exit(1);
-            }
-        } else {
-            controlSocket.serviceIo(&readfds, &writefds);
-            socketToParent.serviceIo(&readfds, &writefds);
-            parentToSocket.serviceIo(&readfds, &writefds);
-
-            if (FD_ISSET(g_wakeupFd.readFd(), &readfds)) {
-                const auto newSize = terminalSize();
-                if (newSize != termSize) {
-                    Packet p = {};
-                    p.type = Packet::Type::SetSize;
-                    p.u.size = newSize;
-                    termSize = newSize;
-                    controlSocket.write(&p, sizeof(p));
-                }
-                g_wakeupFd.clear();
-            }
+static void ptyToSocketThread(int socketFd) {
+    std::array<char, 8192> buf;
+    while (true) {
+        const ssize_t amt1 = readRestarting(STDIN_FILENO, buf.data(), buf.size());
+        if (amt1 <= 0) {
+            connectionBrokenAbort();
         }
+        // If the backend shuts down the socket due to end-of-stream, this
+        // write could fail.  In that case, ignore the failure, but continue to
+        // flush I/O from the pty.
+        writeAllRestarting(socketFd, buf.data(), amt1);
+    }
+}
 
-        for (int fd = 0; fd <= maxfd; ++fd) {
-            FD_CLR(fd, &readfds);
-            FD_CLR(fd, &writefds);
+static void socketToPtyThread(IoLoop *ioloop, int socketFd) {
+    uint32_t bytesWritten = 0;
+    std::array<char, 32 * 1024> buf;
+    while (true) {
+        const ssize_t amt1 = readRestarting(socketFd, buf.data(), buf.size());
+        if (amt1 == 0) {
+            std::lock_guard<std::mutex> guard(ioloop->mutex);
+            ioloop->ioFinished = true;
+            g_wakeupFd.set();
+            break;
         }
-
-        while (controlSocket.size() >= sizeof(Packet)) {
-            Packet p = {};
-            controlSocket.read(&p, sizeof(p));
-            switch (p.type) {
-                case Packet::Type::IncreaseWindow:
-                    parentToSocket.increaseWindow(p.u.amount);
-                    break;
-                case Packet::Type::ChildExitStatus:
-                    childReaped = true;
-                    childExitStatus = p.u.exitStatus;
-                    break;
-                default:
-                    break;
-            }
+        if (amt1 < 0) {
+            connectionBrokenAbort();
         }
-
-        if (socketToParent.bytesWritten() >= kBackendToFrontendWindow / 2) {
-            Packet p = {};
-            p.type = Packet::Type::IncreaseWindow;
-            p.u.amount = socketToParent.bytesWritten();
-            socketToParent.resetBytesWritten();
-            controlSocket.write(&p, sizeof(p));
+        if (!writeAllRestarting(STDOUT_FILENO, buf.data(), amt1)) {
+            connectionBrokenAbort();
         }
-
-        if (childReaped &&
-                socketToParent.hasReadFailed() &&
-                socketToParent.isBufferEmpty()) {
-            // Normal exit path: the child has exited, we have its exit code,
-            // the pty is closed, and we've written everything we can to the
-            // parent pty.
-            return childExitStatus;
+        bytesWritten += amt1;
+        if (bytesWritten > kOutputWindowSize / 2) {
+            Packet p = { Packet::Type::IncreaseWindow };
+            p.u.windowAmount = bytesWritten;
+            writePacket(*ioloop, p);
+            bytesWritten = 0;
         }
     }
-    fprintf(stderr, "wslbridge: broken connection\r\n");
-    return 1;
+}
+
+static void handlePacket(IoLoop *ioloop, const Packet &p) {
+    if (p.type == Packet::Type::ChildExitStatus) {
+        std::lock_guard<std::mutex> guard(ioloop->mutex);
+        ioloop->childReaped = true;
+        ioloop->childExitStatus = p.u.exitStatus;
+        g_wakeupFd.set();
+    }
+}
+
+static void mainLoop(int controlSocketFd, int dataSocketFd, TermSize termSize) {
+    const auto termMode = setRawTerminalMode();
+    IoLoop ioloop;
+    ioloop.controlSocketFd = controlSocketFd;
+    std::thread p2s(ptyToSocketThread, dataSocketFd);
+    std::thread s2p(socketToPtyThread, &ioloop, dataSocketFd);
+    std::thread rcs(readControlSocketThread<IoLoop, handlePacket>, controlSocketFd, &ioloop);
+    int32_t exitStatus = -1;
+
+    while (true) {
+        g_wakeupFd.wait();
+        const auto newSize = terminalSize();
+        if (newSize != termSize) {
+            Packet p = { Packet::Type::SetSize };
+            p.u.termSize = termSize = newSize;
+            writePacket(ioloop, p);
+        }
+        std::lock_guard<std::mutex> guard(ioloop.mutex);
+        if (ioloop.childReaped && ioloop.ioFinished) {
+            exitStatus = ioloop.childExitStatus;
+            break;
+        }
+    }
+
+    // Socket-to-pty I/O is finished already.
+    s2p.join();
+
+    restoreTerminalMode(termMode);
+
+    // We can't return, because the threads could still be running.  Rather
+    // than shut them down gracefully, which seems hard(?), just let the OS
+    // clean everything up.
+    exit(exitStatus);
 }
 
 static bool pathExists(const std::wstring &path) {
@@ -418,8 +426,8 @@ int main() {
         L" " + std::to_wstring(controlSocket.port()) +
         L" " + std::to_wstring(dataSocket.port()) +
         L" " + mbsToWcs(key) +
-        L" " + std::to_wstring(initialSize.first) +
-        L" " + std::to_wstring(initialSize.second) +
+        L" " + std::to_wstring(initialSize.cols) +
+        L" " + std::to_wstring(initialSize.rows) +
         L"\"";
 
     std::wstring appPath = bashPath;
@@ -443,12 +451,6 @@ int main() {
     controlSocket.close();
     dataSocket.close();
 
-    setSocketNonblocking(controlSocketC);
-    setSocketNonblocking(dataSocketC);
-
-    const auto termMode = setRawTerminalMode();
-    const int exitStatus = mainLoop(controlSocketC, dataSocketC, initialSize);
-    restoreTerminalMode(termMode);
-
-    return exitStatus;
+    mainLoop(controlSocketC, dataSocketC, initialSize);
+    return 0;
 }
