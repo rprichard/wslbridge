@@ -70,6 +70,7 @@ struct IoLoop {
     std::atomic<int32_t> window = {0};
     int controlSocketFd = -1;
     int childFd = -1;
+    WindowParams windowParams = {};
 };
 
 static void writePacket(IoLoop &ioloop, const Packet &p) {
@@ -95,23 +96,23 @@ static void socketToPtyThread(IoLoop *ioloop, int socketFd) {
 }
 
 static void ptyToSocketThread(IoLoop *ioloop, int socketFd) {
+    const auto windowThreshold = ioloop->windowParams.threshold;
+    const auto windowSize = ioloop->windowParams.size;
     std::array<char, 32 * 1024> buf;
-    int32_t locWindow = kOutputWindowSize;
-    const int32_t kThreshold = kOutputWindowSize / 4;
+    int32_t locWindow = windowSize;
+    const auto hasWindow = [&](bool readAtomic = true) -> bool {
+        if (readAtomic) {
+            const int32_t iw = ioloop->window.exchange(0);
+            assert(iw <= windowSize - locWindow);
+            locWindow += iw;
+        }
+        return locWindow >= windowThreshold;
+    };
     while (true) {
-        if (locWindow < kThreshold) {
-            locWindow += ioloop->window.exchange(0);
-            if (locWindow < kThreshold) {
-                std::unique_lock<std::mutex> lock(ioloop->windowMutex);
-                while (true) {
-                    locWindow += ioloop->window.exchange(0);
-                    if (locWindow < kThreshold) {
-                        ioloop->windowIncrease.wait(lock);
-                    } else {
-                        break;
-                    }
-                }
-            }
+        assert(locWindow >= 0 && locWindow <= windowSize);
+        if (!hasWindow(false) && !hasWindow()) {
+            std::unique_lock<std::mutex> lock(ioloop->windowMutex);
+            ioloop->windowIncrease.wait(lock, hasWindow);
         }
         const ssize_t amt1 =
             readRestarting(ioloop->childFd, buf.data(),
@@ -140,8 +141,14 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
         }
         case Packet::Type::IncreaseWindow: {
             {
+                // Read ioloop->window into cw once to ensure a stable value.
+                const int32_t max = ioloop->windowParams.size;
+                const int32_t cw = ioloop->window;
+                const int32_t iw = p.u.windowAmount;
+                assert(cw >= 0 && cw <= max &&
+                       iw >= 0 && iw <= max - cw);
                 std::lock_guard<std::mutex> guard(ioloop->windowMutex);
-                ioloop->window += p.u.windowAmount;
+                ioloop->window += iw;
             }
             ioloop->windowIncrease.notify_one();
             break;
@@ -154,10 +161,12 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
     }
 }
 
-static void mainLoop(int controlSocketFd, int dataSocketFd, Child child) {
+static void mainLoop(int controlSocketFd, int dataSocketFd, Child child,
+                     WindowParams windowParams) {
     IoLoop ioloop;
     ioloop.controlSocketFd = controlSocketFd;
     ioloop.childFd = child.masterfd;
+    ioloop.windowParams = windowParams;
     std::thread s2p(socketToPtyThread, &ioloop, dataSocketFd);
     std::thread p2s(ptyToSocketThread, &ioloop, dataSocketFd);
     std::thread rcs(readControlSocketThread<IoLoop, handlePacket>, controlSocketFd, &ioloop);
@@ -190,7 +199,7 @@ static void mainLoop(int controlSocketFd, int dataSocketFd, Child child) {
 } // namespace
 
 int main(int argc, char *argv[]) {
-    assert(argc == 6);
+    assert(argc == 8);
 
     const int controlSocketPort = atoi(argv[1]);
     const int dataSocketPort = atoi(argv[2]);
@@ -198,12 +207,17 @@ int main(int argc, char *argv[]) {
     const int cols = atoi(argv[4]);
     const int rows = atoi(argv[5]);
 
+    const WindowParams windowParams = { atoi(argv[6]), atoi(argv[7]) };
+    assert(windowParams.size >= 1);
+    assert(windowParams.threshold >= 1);
+    assert(windowParams.threshold <= windowParams.size);
+
     const int controlSocket = connectSocket(controlSocketPort, key);
     const int dataSocket = connectSocket(dataSocketPort, key);
 
     const auto child = spawnChild(cols, rows);
 
-    mainLoop(controlSocket, dataSocket, child);
+    mainLoop(controlSocket, dataSocket, child, windowParams);
 
     return 0;
 }

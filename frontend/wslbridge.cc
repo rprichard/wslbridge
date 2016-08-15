@@ -25,6 +25,8 @@
 
 #define BACKEND_PROGRAM "wslbridge-backend"
 
+const int32_t kOutputWindowSize = 8192;
+
 // SystemFunction036 is also known as RtlGenRandom.  It might be possible to
 // replace this with getentropy, if not now, then later.
 extern "C" BOOLEAN WINAPI SystemFunction036(PVOID, ULONG);
@@ -270,7 +272,7 @@ static void socketToPtyThread(IoLoop *ioloop, int socketFd) {
             connectionBrokenAbort();
         }
         bytesWritten += amt1;
-        if (bytesWritten > kOutputWindowSize / 2) {
+        if (bytesWritten >= kOutputWindowSize / 2) {
             Packet p = { Packet::Type::IncreaseWindow };
             p.u.windowAmount = bytesWritten;
             writePacket(*ioloop, p);
@@ -428,6 +430,8 @@ int main() {
         L" " + mbsToWcs(key) +
         L" " + std::to_wstring(initialSize.cols) +
         L" " + std::to_wstring(initialSize.rows) +
+        L" " + std::to_wstring(kOutputWindowSize) +
+        L" " + std::to_wstring(kOutputWindowSize / 4) +
         L"\"";
 
     std::wstring appPath = bashPath;

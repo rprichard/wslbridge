@@ -13,8 +13,6 @@
 #include <utility>
 #include <vector>
 
-const size_t kOutputWindowSize = 8192;
-
 ssize_t writeRestarting(int fd, const void *buf, size_t count);
 bool writeAllRestarting(int fd, const void *buf, size_t count);
 ssize_t readRestarting(int fd, void *buf, size_t count);
@@ -30,6 +28,11 @@ struct TermSize {
     bool operator!=(const TermSize &o) const {
         return !(*this == o);
     }
+};
+
+struct WindowParams {
+    int32_t size;       // Maximum number of bytes in flight.
+    int32_t threshold;  // Minimum remaining window to initiate I/O.
 };
 
 struct Packet {
