@@ -46,19 +46,31 @@ static int connectSocket(int port, const std::string &key) {
     return s;
 }
 
+struct ChildParams {
+    int cols = -1;
+    int rows = -1;
+    std::vector<char*> env;
+    std::vector<char*> argv;
+};
+
 struct Child {
     pid_t pid;
     int masterfd;
 };
 
-static Child spawnChild(int cols, int rows) {
+static Child spawnChild(const ChildParams &params) {
+    assert(params.argv.size() >= 2);
+    assert(params.argv.back() == nullptr);
     int masterfd = 0;
     winsize ws = {};
-    ws.ws_col = cols;
-    ws.ws_row = rows;
+    ws.ws_col = params.cols;
+    ws.ws_row = params.rows;
     const pid_t pid = forkpty(&masterfd, nullptr, nullptr, &ws);
     if (pid == 0) {
-        execl("/bin/bash", "/bin/bash", nullptr);
+        for (const auto &setting : params.env) {
+            putenv(setting);
+        }
+        execvp(params.argv[0], params.argv.data());
         abort();
     }
     return Child { pid, masterfd };
@@ -202,18 +214,58 @@ static void mainLoop(int controlSocketFd, int dataSocketFd, Child child,
     rcs.join();
 }
 
+template <typename T>
+void required(const char *opt, const T &val, const T &unset) {
+    if (val == unset) {
+        fprintf(stderr, "error: option '%s' is missing\n", opt);
+        exit(1);
+    }
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
-    assert(argc == 8);
 
-    const int controlSocketPort = atoi(argv[1]);
-    const int dataSocketPort = atoi(argv[2]);
-    const std::string key = argv[3];
-    const int cols = atoi(argv[4]);
-    const int rows = atoi(argv[5]);
+    int controlSocketPort = -1;
+    int dataSocketPort = -1;
+    std::string key;
+    int windowSize = -1;
+    int windowThreshold = -1;
+    ChildParams childParams;
 
-    const WindowParams windowParams = { atoi(argv[6]), atoi(argv[7]) };
+    int ch = 0;
+    while ((ch = getopt(argc, argv, "+s:d:k:c:r:w:t:e:")) != -1) {
+        switch (ch) {
+            case 's': controlSocketPort = atoi(optarg); break;
+            case 'd': dataSocketPort = atoi(optarg); break;
+            case 'k': key = optarg; break;
+            case 'c': childParams.cols = atoi(optarg); break;
+            case 'r': childParams.rows = atoi(optarg); break;
+            case 'w': windowSize = atoi(optarg); break;
+            case 't': windowThreshold = atoi(optarg); break;
+            case 'e': childParams.env.push_back(strdup(optarg)); break;
+            default:
+                exit(1);
+        }
+    }
+    for (int i = optind; i < argc; ++i) {
+        childParams.argv.push_back(argv[i]);
+    }
+
+    required("-s", controlSocketPort, -1);
+    required("-d", dataSocketPort, -1);
+    required("-k", key, std::string());
+    required("-c", childParams.cols, -1);
+    required("-r", childParams.rows, -1);
+    required("-w", windowSize, -1);
+    required("-t", windowThreshold, -1);
+
+    if (childParams.argv.empty()) {
+        childParams.argv.push_back(strdup("/bin/bash"));
+    }
+    childParams.argv.push_back(nullptr);
+
+    const WindowParams windowParams = { windowSize, windowThreshold };
     assert(windowParams.size >= 1);
     assert(windowParams.threshold >= 1);
     assert(windowParams.threshold <= windowParams.size);
@@ -221,7 +273,7 @@ int main(int argc, char *argv[]) {
     const int controlSocket = connectSocket(controlSocketPort, key);
     const int dataSocket = connectSocket(dataSocketPort, key);
 
-    const auto child = spawnChild(cols, rows);
+    const auto child = spawnChild(childParams);
 
     mainLoop(controlSocket, dataSocket, child, windowParams);
 

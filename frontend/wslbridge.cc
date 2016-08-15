@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <signal.h>
@@ -15,6 +16,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <mutex>
 #include <string>
@@ -241,7 +243,7 @@ void TerminalState::leaveRawMode(const std::lock_guard<std::mutex> &lock) {
 void TerminalState::fatal(const char *msg) {
     std::lock_guard<std::mutex> lock(mutex_);
     leaveRawMode(lock);
-    fprintf(stderr, "\n%s\n", msg);
+    fprintf(stderr, "\nwslbridge error: %s\n", msg);
     exit(1);
 }
 
@@ -408,7 +410,7 @@ std::wstring convertPathToWsl(const std::wstring &path) {
         } else if (ch >= L'A' && ch <= 'Z') {
             return ch - L'A' + L'a';
         } else {
-            return false;
+            return L'\0';
         }
     };
     const auto isSlash = [](wchar_t ch) -> bool {
@@ -419,8 +421,7 @@ std::wstring convertPathToWsl(const std::wstring &path) {
         if (drive && path[1] == L':' && isSlash(path[2])) {
             // Acceptable path.
             std::wstring ret = L"/mnt/";
-            ret.push_back(static_cast<wchar_t>(tolower(path[0])));
-            ret.push_back(L'/');
+            ret.push_back(drive);
             ret.append(path.substr(2));
             for (wchar_t &ch : ret) {
                 if (ch == L'\\') {
@@ -476,11 +477,162 @@ std::wstring findSystemProgram(const wchar_t *name) {
 #endif
 }
 
+static void usage(const char *prog) {
+    printf("Usage: %s [options] [--] [command]...\n", prog);
+    printf("Runs a program within a Windows Subsystem for Linux (WSL) pty\n");
+    printf("\n");
+    printf("Options:\n");
+    printf("  -e VAR        Copies VAR into the WSL environment.\n");
+    printf("  -e VAR=VAL    Sets VAR to VAL in the WSL environment.\n");
+    exit(0);
+}
+
+class Environment {
+public:
+    void set(const std::string &var) {
+        const char *value = getenv(var.c_str());
+        if (value != nullptr) {
+            set(var, value);
+        }
+    }
+
+    void set(const std::string &var, const std::string &value) {
+        pairs_.push_back(std::make_pair(mbsToWcs(var), mbsToWcs(value)));
+    }
+
+    const std::vector<std::pair<std::wstring, std::wstring>> &pairs() { return pairs_; }
+
+private:
+    std::vector<std::pair<std::wstring, std::wstring>> pairs_;
+};
+
+// Make an argument suitable for addition to a Win32 CreateProcess command-line
+// following the escaping convention documented on MSDN.  (e.g. See
+// CommandLineToArgvW documentation.)
+static void appendWinArg(std::wstring &out, const std::wstring &arg) {
+    if (!out.empty()) {
+        out.push_back(L' ');
+    }
+    const bool quote = arg.find_first_of(L" \t") != std::wstring::npos || arg.empty();
+    if (quote) {
+        out.push_back(L'\"');
+    }
+    int bsCount = 0;
+    for (wchar_t ch : arg) {
+        if (ch == L'\\') {
+            ++bsCount;
+        } else if (ch == L'\"') {
+            out.append(bsCount * 2 + 1, L'\\');
+            out.push_back(L'\"');
+            bsCount = 0;
+        } else {
+            out.append(bsCount, L'\\');
+            bsCount = 0;
+            out.push_back(ch);
+        }
+    }
+    if (quote) {
+        out.append(bsCount * 2, L'\\');
+        out.push_back(L'\"');
+    } else {
+        out.append(bsCount, L'\\');
+    }
+}
+
+static void appendBashArg(std::wstring &out, const std::wstring &arg) {
+    if (!out.empty()) {
+        out.push_back(L' ');
+    }
+    const auto isCharSafe = [](wchar_t ch) -> bool {
+        switch (ch) {
+            case L'%':
+            case L'+':
+            case L',':
+            case L'-':
+            case L'.':
+            case L'/':
+            case L':':
+            case L'=':
+            case L'@':
+            case L'_':
+            case L'{':
+            case L'}':
+                return true;
+            default:
+                return (ch >= L'0' && ch <= L'9') ||
+                       (ch >= L'a' && ch <= L'z') ||
+                       (ch >= L'A' && ch <= L'Z');
+        }
+    };
+    if (arg.empty()) {
+        out.append(L"''");
+        return;
+    }
+    if (std::all_of(arg.begin(), arg.end(), isCharSafe)) {
+        out.append(arg);
+        return;
+    }
+    bool inQuote = false;
+    const auto enterQuote = [&](bool newInQuote) {
+        if (inQuote != newInQuote) {
+            out.push_back(L'\'');
+            inQuote = newInQuote;
+        }
+    };
+    for (auto ch : arg) {
+        if (ch == L'\'') {
+            enterQuote(false);
+            out.append(L"\\'");
+        } else if (isCharSafe(ch)) {
+            out.push_back(ch);
+        } else {
+            enterQuote(true);
+            out.push_back(ch);
+        }
+    }
+    enterQuote(false);
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
     setlocale(LC_ALL, "");
 
+    Environment env;
+    env.set("TERM");
+
+    int c = 0;
+    const struct option kOptionTable[] = {
+        { "help", false, nullptr, 'h' },
+        { nullptr,  false, nullptr, 0 },
+    };
+    while ((c = getopt_long(argc, argv, "+e:", kOptionTable, nullptr)) != -1) {
+        switch (c) {
+            case 'e': {
+                const char *eq = strchr(optarg, '=');
+                const auto varname = eq ? std::string(optarg, eq - optarg) : std::string(optarg);
+                if (varname.empty()) {
+                    fprintf(stderr, "error: -e variable name cannot be empty: '%s'", optarg);
+                    exit(1);
+                }
+                if (eq) {
+                    env.set(varname, eq + 1);
+                } else {
+                    env.set(varname);
+                }
+                break;
+            }
+            case 'h':
+                usage(argv[0]);
+                break;
+            default:
+                fprintf(stderr, "Try '%s --help' for more information.\n", argv[0]);
+                exit(1);
+        }
+    }
+
+    // We must register this handler *before* determining the initial terminal
+    // size.
     struct sigaction sa = {};
     sa.sa_handler = [](int signo) { g_wakeupFd.set(); };
     sa.sa_flags = SA_RESTART;
@@ -489,38 +641,45 @@ int main(int argc, char *argv[]) {
     Socket controlSocket;
     Socket dataSocket;
 
-    const bool kUseCmdToDebug = false;
-
-    const auto initialSize = terminalSize();
-    const std::string key = randomString();
     const std::wstring bashPath = findSystemProgram(L"bash.exe");
     const std::wstring backendPath = convertPathToWsl(findBackendProgram());
-    std::wstring cmdline =
-        bashPath + L" -c \"" +
-        backendPath +
-        L" " + std::to_wstring(controlSocket.port()) +
-        L" " + std::to_wstring(dataSocket.port()) +
-        L" " + mbsToWcs(key) +
-        L" " + std::to_wstring(initialSize.cols) +
-        L" " + std::to_wstring(initialSize.rows) +
-        L" " + std::to_wstring(kOutputWindowSize) +
-        L" " + std::to_wstring(kOutputWindowSize / 4) +
-        L"\"";
+    const auto initialSize = terminalSize();
+    const std::string key = randomString();
 
-    std::wstring appPath = bashPath;
-
-    if (kUseCmdToDebug) {
-        const std::wstring cmdPath = findSystemProgram(L"cmd.exe");
-        cmdline = cmdPath + L" /k " + cmdline;
-        appPath = cmdPath;
+    // Prepare the backend command line.
+    std::wstring bashCmdLine;
+    appendBashArg(bashCmdLine, backendPath);
+    std::array<wchar_t, 1024> buffer;
+    int iRet = swprintf(buffer.data(), buffer.size(),
+                        L" -s%d -d%d -k%s -c%d -r%d -w%d -t%d",
+                        controlSocket.port(),
+                        dataSocket.port(),
+                        key.c_str(),
+                        initialSize.cols,
+                        initialSize.rows,
+                        kOutputWindowSize,
+                        kOutputWindowSize / 4);
+    assert(iRet > 0);
+    bashCmdLine.append(buffer.data());
+    for (const auto &envPair : env.pairs()) {
+        appendBashArg(bashCmdLine, L"-e" + envPair.first + L"=" + envPair.second);
     }
+    appendBashArg(bashCmdLine, L"--");
+    for (int i = optind; i < argc; ++i) {
+        appendBashArg(bashCmdLine, mbsToWcs(argv[i]));
+    }
+
+    std::wstring cmdLine;
+    appendWinArg(cmdLine, bashPath);
+    appendWinArg(cmdLine, L"-c");
+    appendWinArg(cmdLine, bashCmdLine);
 
     STARTUPINFOW sui = {};
     sui.cb = sizeof(sui);
     PROCESS_INFORMATION pi = {};
-    BOOL success = CreateProcessW(appPath.c_str(), &cmdline[0], nullptr, nullptr,
+    BOOL success = CreateProcessW(bashPath.c_str(), &cmdLine[0], nullptr, nullptr,
         false,
-        kUseCmdToDebug ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW,
+        CREATE_NO_WINDOW,
         nullptr, nullptr, &sui, &pi);
     assert(success && "CreateProcess failed");
 
