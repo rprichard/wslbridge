@@ -54,26 +54,101 @@ struct ChildParams {
 };
 
 struct Child {
+    SpawnError spawnError;
     pid_t pid;
     int masterfd;
+};
+
+class UniqueFd {
+    int fd_;
+public:
+    int fd() const { return fd_; }
+    UniqueFd() : fd_(-1) {}
+    explicit UniqueFd(int fd) : fd_(fd) {}
+    ~UniqueFd() { close(); }
+    int release() {
+        const int ret = fd_;
+        fd_ = -1;
+        return ret;
+    }
+    void close() {
+        if (fd_ != -1) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+    }
+    UniqueFd(const UniqueFd &other) = delete;
+    UniqueFd &operator=(const UniqueFd &other) = delete;
+    UniqueFd(UniqueFd &&other) : fd_(other.release()) {}
+    UniqueFd &operator=(UniqueFd &&other) {
+        close();
+        fd_ = other.release();
+        return *this;
+    }
 };
 
 static Child spawnChild(const ChildParams &params) {
     assert(params.argv.size() >= 2);
     assert(params.argv.back() == nullptr);
-    int masterfd = 0;
+
     winsize ws = {};
     ws.ws_col = params.cols;
     ws.ws_row = params.rows;
-    const pid_t pid = forkpty(&masterfd, nullptr, nullptr, &ws);
-    if (pid == 0) {
+
+    UniqueFd errPipeRead, errPipeWrite;
+
+    {
+        int errPipe[2];
+        if (pipe2(errPipe, O_CLOEXEC) != 0) {
+            fatalPerror("error: pipe2 failed");
+        }
+        errPipeRead = UniqueFd(errPipe[0]);
+        errPipeWrite = UniqueFd(errPipe[1]);
+    }
+
+    int masterFdRaw = -1;
+    const pid_t pid = forkpty(&masterFdRaw, nullptr, nullptr, &ws);
+    if (pid == static_cast<pid_t>(-1)) {
+        // forkpty failed
+        const SpawnError err = {
+            SpawnError::Type::ForkPtyFailed,
+            bridgedError(errno)
+        };
+        return Child { err, -1, -1 };
+
+    } else if (pid == 0) {
+        // forked process
+        errPipeRead.close();
         for (const auto &setting : params.env) {
             putenv(setting);
         }
         execvp(params.argv[0], params.argv.data());
+        const int err = errno;
+        writeAllRestarting(errPipeWrite.fd(), &err, sizeof(err));
         abort();
     }
-    return Child { pid, masterfd };
+
+    UniqueFd masterFd(masterFdRaw);
+
+    errPipeWrite.close();
+
+    int execErrno = -1;
+    if (readAllRestarting(errPipeRead.fd(), &execErrno, sizeof(execErrno))) {
+        // The child exec call failed.
+        int dummy = 0;
+        waitpid(pid, &dummy, 0);
+        const SpawnError err = {
+            SpawnError::Type::ExecFailed,
+            bridgedError(execErrno)
+        };
+        return Child { err, -1, -1 };
+    }
+
+    return Child {
+        SpawnError { SpawnError::Type::Success, bridgedError(0) },
+        pid,
+        masterFd.release()
+    };
 }
 
 struct IoLoop {
@@ -86,8 +161,7 @@ struct IoLoop {
 };
 
 static void connectionBrokenAbort() {
-    fprintf(stderr, "error: connection broken\n");
-    exit(1);
+    fatal("error: connection broken\n");
 }
 
 static void writePacket(IoLoop &ioloop, const Packet &p) {
@@ -171,9 +245,8 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
             break;
         }
         default: {
-            fprintf(stderr, "internal error: unexpected packet %d\n",
+            fatal("internal error: unexpected packet %d\n",
                 static_cast<int>(p.type));
-            exit(1);
         }
     }
 }
@@ -184,41 +257,53 @@ static void mainLoop(int controlSocketFd, int dataSocketFd, Child child,
     ioloop.controlSocketFd = controlSocketFd;
     ioloop.childFd = child.masterfd;
     ioloop.windowParams = windowParams;
-    std::thread s2p(socketToPtyThread, &ioloop, dataSocketFd);
-    std::thread p2s(ptyToSocketThread, &ioloop, dataSocketFd);
+
     std::thread rcs(readControlSocketThread<IoLoop, handlePacket, connectionBrokenAbort>,
                     controlSocketFd, &ioloop);
 
-    // Block until the child process finishes, then notify the frontend of
-    // child exit.
-    int exitStatus = 0;
-    if (waitpid(child.pid, &exitStatus, 0) != child.pid) {
-        perror("waitpid failed");
-        exit(1);
-    }
-    if (WIFEXITED(exitStatus)) {
-        exitStatus = WEXITSTATUS(exitStatus);
-    } else {
-        // XXX: I'm just making something up here.  I've got
-        // no idea whether this makes sense.
-        exitStatus = 1;
-    }
-    Packet p = { Packet::Type::ChildExitStatus };
-    p.u.exitStatus = exitStatus;
-    writePacket(ioloop, p);
+    if (child.spawnError.type == SpawnError::Type::Success) {
+        std::thread s2p(socketToPtyThread, &ioloop, dataSocketFd);
+        std::thread p2s(ptyToSocketThread, &ioloop, dataSocketFd);
 
-    // Ensure that the parent thread outlives its child threads.  The program
-    // should exit before these threads finish.
-    s2p.join();
-    p2s.join();
+        // Block until the child process finishes, then notify the frontend of
+        // child exit.
+        int exitStatus = 0;
+        if (waitpid(child.pid, &exitStatus, 0) != child.pid) {
+            fatalPerror("waitpid failed");
+        }
+        if (WIFEXITED(exitStatus)) {
+            exitStatus = WEXITSTATUS(exitStatus);
+        } else {
+            // XXX: I'm just making something up here.  I've got
+            // no idea whether this makes sense.
+            exitStatus = 1;
+        }
+        Packet p = { Packet::Type::ChildExitStatus };
+        p.u.exitStatus = exitStatus;
+        writePacket(ioloop, p);
+
+        // Ensure that the parent thread outlives its child threads.  The program
+        // should exit before these threads finish.
+        s2p.join();
+        p2s.join();
+    } else {
+        // The pty never really opened.  Shutdown I/O on the data socket to
+        // ensure that the frontend won't block writing to the socket
+        // (unlikely).
+        shutdown(dataSocketFd, SHUT_RDWR);
+
+        Packet p = { Packet::Type::SpawnFailed };
+        p.u.spawnError = child.spawnError;
+        writePacket(ioloop, p);
+    }
+
     rcs.join();
 }
 
 template <typename T>
 void required(const char *opt, const T &val, const T &unset) {
     if (val == unset) {
-        fprintf(stderr, "error: option '%s' is missing\n", opt);
-        exit(1);
+        fatal("error: option '%s' is missing\n", opt);
     }
 }
 

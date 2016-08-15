@@ -35,11 +35,6 @@ namespace {
 
 const int32_t kOutputWindowSize = 8192;
 
-struct SavedTermiosMode {
-    bool valid;
-    termios mode[2];
-};
-
 static WakeupFd g_wakeupFd;
 
 static TermSize terminalSize() {
@@ -114,8 +109,7 @@ static std::string randomString() {
 static std::wstring mbsToWcs(const std::string &s) {
     const size_t len = mbstowcs(nullptr, s.c_str(), 0);
     if (len == static_cast<size_t>(-1)) {
-        fprintf(stderr, "error: mbsToWcs: invalid string\n");
-        exit(1);
+        fatal("error: mbsToWcs: invalid string\n");
     }
     std::wstring ret;
     ret.resize(len);
@@ -127,8 +121,7 @@ static std::wstring mbsToWcs(const std::string &s) {
 static std::string wcsToMbs(const std::wstring &s) {
     const size_t len = wcstombs(nullptr, s.c_str(), 0);
     if (len == static_cast<size_t>(-1)) {
-        fprintf(stderr, "error: wcsToMbs: invalid string\n");
-        exit(1);
+        fatal("error: wcsToMbs: invalid string\n");
     }
     std::string ret;
     ret.resize(len);
@@ -164,8 +157,7 @@ static int acceptClientAndAuthenticate(Socket &socket, const std::string &key) {
         i += actual;
     }
     if (!secureStrEqual(checkBuf, key)) {
-        fprintf(stderr, "key check failed\n");
-        exit(1);
+        fatal("error: key check failed\n");
     }
     return cs;
 }
@@ -183,7 +175,10 @@ private:
     void leaveRawMode(const std::lock_guard<std::mutex> &lock);
 
 public:
-    void fatal(const char *msg);
+    void fatal(const char *fmt, ...)
+        __attribute__((noreturn))
+        __attribute__((format(printf, 2, 3)));
+    void fatalv(const char *fmt, va_list ap) __attribute__((noreturn));
     void exitCleanly(int exitStatus);
 };
 
@@ -198,20 +193,17 @@ void TerminalState::enterRawMode() {
     for (int i = 0; i < 2; ++i) {
         // XXX: These restrictions are probably excessive?
         if (!isatty(i)) {
-            fprintf(stderr, "%s is not a tty\n", kNames[i]);
-            exit(1);
+            fatal("%s is not a tty\n", kNames[i]);
         }
         if (tcgetattr(i, &mode_[i]) < 0) {
-            perror("tcgetattr failed");
-            exit(1);
+            fatalPerror("tcgetattr failed");
         }
     }
 
     {
         termios buf;
         if (tcgetattr(0, &buf) < 0) {
-            perror("tcgetattr failed");
-            exit(1);
+            fatalPerror("tcgetattr failed");
         }
         buf.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
         buf.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
@@ -220,23 +212,20 @@ void TerminalState::enterRawMode() {
         buf.c_cc[VMIN] = 1;  // blocking read
         buf.c_cc[VTIME] = 0;
         if (tcsetattr(0, TCSAFLUSH, &buf) < 0) {
-            fprintf(stderr, "tcsetattr failed\n");
-            exit(1);
+            fatalPerror("tcsetattr failed");
         }
     }
 
     {
         termios buf;
         if (tcgetattr(1, &buf) < 0) {
-            perror("tcgetattr failed");
-            exit(1);
+            fatalPerror("tcgetattr failed");
         }
         buf.c_cflag &= ~(CSIZE | PARENB);
         buf.c_cflag |= CS8;
         buf.c_oflag &= ~OPOST;
         if (tcsetattr(1, TCSAFLUSH, &buf) < 0) {
-            fprintf(stderr, "tcsetattr failed\n");
-            exit(1);
+            fatalPerror("tcsetattr failed");
         }
     }
 }
@@ -247,24 +236,33 @@ void TerminalState::leaveRawMode(const std::lock_guard<std::mutex> &lock) {
     }
     for (int i = 0; i < 2; ++i) {
         if (tcsetattr(i, TCSAFLUSH, &mode_[i]) < 0) {
-            perror("error restoring terminal mode");
-            exit(1);
+            fatalPerror("error restoring terminal mode");
         }
     }
 }
 
 // This function cannot be used from a signal handler.
-void TerminalState::fatal(const char *msg) {
+void TerminalState::fatal(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    this->fatalv(fmt, ap);
+    va_end(ap);
+}
+
+void TerminalState::fatalv(const char *fmt, va_list ap) {
     std::lock_guard<std::mutex> lock(mutex_);
     leaveRawMode(lock);
-    fprintf(stderr, "\nwslbridge error: %s\n", msg);
-    exit(1);
+    ::fatalv(fmt, ap);
 }
 
 void TerminalState::exitCleanly(int exitStatus) {
     std::lock_guard<std::mutex> lock(mutex_);
     leaveRawMode(lock);
-    exit(exitStatus);
+    fflush(stdout);
+    fflush(stderr);
+    // Avoid calling exit, which would call global destructors and destruct the
+    // WakeupFd object.
+    _exit(exitStatus);
 }
 
 static TerminalState g_terminalState;
@@ -278,7 +276,7 @@ struct IoLoop {
 };
 
 static void fatalConnectionBroken() {
-    g_terminalState.fatal("connection broken");
+    g_terminalState.fatal("\nwslbridge error: connection broken\n");
 }
 
 static void writePacket(IoLoop &ioloop, const Packet &p) {
@@ -331,11 +329,29 @@ static void socketToPtyThread(IoLoop *ioloop, int socketFd) {
 }
 
 static void handlePacket(IoLoop *ioloop, const Packet &p) {
-    if (p.type == Packet::Type::ChildExitStatus) {
-        std::lock_guard<std::mutex> lock(ioloop->mutex);
-        ioloop->childReaped = true;
-        ioloop->childExitStatus = p.u.exitStatus;
-        g_wakeupFd.set();
+    switch (p.type) {
+        case Packet::Type::ChildExitStatus: {
+            std::lock_guard<std::mutex> lock(ioloop->mutex);
+            ioloop->childReaped = true;
+            ioloop->childExitStatus = p.u.exitStatus;
+            g_wakeupFd.set();
+            break;
+        }
+        case Packet::Type::SpawnFailed: {
+            std::string msg;
+            if (p.u.spawnError.type == SpawnError::Type::ForkPtyFailed) {
+                msg = "error: forkpty failed: ";
+            } else {
+                msg = "error: could not start process: ";
+            }
+            msg += errorString(p.u.spawnError.error);
+            g_terminalState.fatal("%s\n", msg.c_str());
+            break;
+        }
+        default: {
+            g_terminalState.fatal("internal error: unexpected packet %d\n",
+                static_cast<int>(p.type));
+        }
     }
 }
 
@@ -393,8 +409,7 @@ static HMODULE getCurrentModule() {
                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                 reinterpret_cast<LPCWSTR>(getCurrentModule),
                 &module)) {
-        fprintf(stderr, "error: GetModuleHandleEx failed\n");
-        exit(1);
+        fatal("error: GetModuleHandleEx failed\n");
     }
     return module;
 }
@@ -411,8 +426,8 @@ std::wstring findBackendProgram() {
     std::wstring progDir = dirname(getModuleFileName(getCurrentModule()));
     std::wstring ret = progDir + (L"\\" BACKEND_PROGRAM);
     if (!pathExists(ret)) {
-        fprintf(stderr, "error: '%ls' backend program is missing\n", ret.c_str());
-        exit(1);
+        fatal("error: '%s' backend program is missing\n",
+            wcsToMbs(ret).c_str());
     }
     return ret;
 }
@@ -445,19 +460,17 @@ std::wstring convertPathToWsl(const std::wstring &path) {
             return ret;
         }
     }
-    fprintf(stderr,
-        "Error: the backend program '%ls' must be located on a "
+    fatal(
+        "Error: the backend program '%s' must be located on a "
         "letter drive so WSL can access it with a /mnt/<LTR> path.\n",
-        path.c_str());
-    exit(1);
+        wcsToMbs(path).c_str());
 }
 
 std::wstring findSystemProgram(const wchar_t *name) {
     std::array<wchar_t, MAX_PATH> windir;
     windir[0] = L'\0';
     if (GetWindowsDirectoryW(windir.data(), windir.size()) == 0) {
-        fprintf(stderr, "error: GetWindowsDirectory call failed\n");
-        exit(1);
+        fatal("error: GetWindowsDirectory call failed\n");
     }
     const wchar_t *const kPart32 = L"\\System32\\";
     const auto path = [&](const wchar_t *part) -> std::wstring {
@@ -468,9 +481,9 @@ std::wstring findSystemProgram(const wchar_t *name) {
     if (pathExists(ret)) {
         return ret;
     } else {
-        fprintf(stderr, "error: '%ls' does not exist\n", ret.c_str());
-        fprintf(stderr, "note: Ubuntu-on-Windows must be installed\n");
-        exit(1);
+        fatal("error: '%s' does not exist\n"
+              "note: Ubuntu-on-Windows must be installed\n",
+              wcsToMbs(ret).c_str());
     }
 #elif defined(__i386__)
     const wchar_t *const kPartNat = L"\\Sysnative\\";
@@ -482,10 +495,9 @@ std::wstring findSystemProgram(const wchar_t *name) {
     if (pathExists(path32)) {
         return std::move(path32);
     }
-    fprintf(stderr, "error: neither '%ls' nor '%ls' exist\n",
-        pathNat.c_str(), path32.c_str());
-    fprintf(stderr, "note: Ubuntu-on-Windows must be installed\n");
-    exit(1);
+    fatal("error: neither '%s' nor '%s' exist\n"
+          "note: Ubuntu-on-Windows must be installed\n",
+          wcsToMbs(pathNat).c_str(), wcsToMbs(path32).c_str());
 #else
     #error "Could not determine architecture"
 #endif
@@ -638,8 +650,7 @@ int main(int argc, char *argv[]) {
                 const char *eq = strchr(optarg, '=');
                 const auto varname = eq ? std::string(optarg, eq - optarg) : std::string(optarg);
                 if (varname.empty()) {
-                    fprintf(stderr, "error: -e variable name cannot be empty: '%s'", optarg);
-                    exit(1);
+                    fatal("error: -e variable name cannot be empty: '%s'\n", optarg);
                 }
                 if (eq) {
                     env.set(varname, eq + 1);
@@ -652,8 +663,7 @@ int main(int argc, char *argv[]) {
                 usage(argv[0]);
                 break;
             default:
-                fprintf(stderr, "Try '%s --help' for more information.\n", argv[0]);
-                exit(1);
+                fatal("Try '%s --help' for more information.\n", argv[0]);
         }
     }
 
@@ -709,16 +719,15 @@ int main(int argc, char *argv[]) {
         CREATE_NO_WINDOW,
         nullptr, nullptr, &sui, &pi);
     if (!success) {
-        fprintf(stderr, "error starting bash.exe adapter: %s\n",
+        fatal("error starting bash.exe adapter: %s\n",
             formatErrorMessage(GetLastError()).c_str());
-        exit(1);
     }
 
     // If the backend process exits before the frontend, then something has
     // gone wrong.
     const auto watchdog = std::thread([=]() {
         WaitForSingleObject(pi.hProcess, INFINITE);
-        g_terminalState.fatal("backend process died");
+        g_terminalState.fatal("\nwslbridge error: backend process died\n");
     });
 
     const int controlSocketC = acceptClientAndAuthenticate(controlSocket, key);

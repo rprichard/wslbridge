@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,9 +14,15 @@
 #include <utility>
 #include <vector>
 
+void fatal(const char *fmt, ...)
+    __attribute__((noreturn))
+    __attribute__((format(printf, 1, 2)));
+void fatalv(const char *fmt, va_list ap) __attribute__((noreturn));
+void fatalPerror(const char *msg) __attribute__((noreturn));
 ssize_t writeRestarting(int fd, const void *buf, size_t count);
 bool writeAllRestarting(int fd, const void *buf, size_t count);
 ssize_t readRestarting(int fd, void *buf, size_t count);
+bool readAllRestarting(int fd, void *buf, size_t count);
 void setSocketNoDelay(int s);
 
 struct TermSize {
@@ -35,12 +42,55 @@ struct WindowParams {
     int32_t threshold;  // Minimum remaining window to initiate I/O.
 };
 
+enum class BridgedErrno : int32_t {
+    Success = 0,
+    Unknown,
+    bE2BIG,
+    bEACCES,
+    bEAGAIN,
+    bEFAULT,
+    bEINVAL,
+    bEIO,
+    bEISDIR,
+    bELIBBAD,
+    bELOOP,
+    bEMFILE,
+    bENAMETOOLONG,
+    bENFILE,
+    bENOENT,
+    bENOEXEC,
+    bENOMEM,
+    bENOTDIR,
+    bEPERM,
+    bETXTBSY,
+};
+
+struct BridgedError {
+    int32_t actual;
+    BridgedErrno bridged;
+};
+
+struct SpawnError {
+    enum class Type : int32_t { Success, ForkPtyFailed, ExecFailed } type;
+    BridgedError error;
+};
+
+BridgedErrno bridgedErrno(int err);
+BridgedError bridgedError(int err);
+std::string errorString(BridgedError err);
+
 struct Packet {
-    enum class Type { SetSize, IncreaseWindow, ChildExitStatus } type;
+    enum class Type : int32_t {
+        SetSize,
+        IncreaseWindow,
+        SpawnFailed,
+        ChildExitStatus
+    } type;
     union {
         TermSize termSize;
         int32_t windowAmount;
         int32_t exitStatus;
+        SpawnError spawnError;
     } u;
 };
 
