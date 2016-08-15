@@ -158,15 +158,19 @@ WakeupFd::WakeupFd() {
 void WakeupFd::wait() {
     do {
         FD_SET(readFd(), &fdset_);
-        int ret = select(readFd() + 1, &fdset_, nullptr, nullptr, nullptr);
-        if (ret < 0 && ret == EINTR) {
+        const int selectRet = select(readFd() + 1, &fdset_, nullptr, nullptr, nullptr);
+        if (selectRet < 0 && selectRet == EINTR) {
             // Try again.
             continue;
-        } else if (ret < 0) {
+        } else if (selectRet < 0) {
             fatalPerror("internal error: select on wakeup pipe failed");
         }
         std::array<char, 32> dummy;
-        if (readRestarting(readFd(), dummy.data(), dummy.size()) <= 0) {
+        const ssize_t readRet = readRestarting(readFd(), dummy.data(), dummy.size());
+        if (readRet < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            // I'm not sure whether this can happen.
+            continue;
+        } else if (readRet <= 0) {
             fatalPerror("internal error: wakeup pipe read failed");
         }
     } while (false);
