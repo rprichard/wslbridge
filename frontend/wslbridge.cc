@@ -437,9 +437,48 @@ std::wstring convertPathToWsl(const std::wstring &path) {
     exit(1);
 }
 
+std::wstring findSystemProgram(const wchar_t *name) {
+    std::array<wchar_t, MAX_PATH> windir;
+    windir[0] = L'\0';
+    if (GetWindowsDirectoryW(windir.data(), windir.size()) == 0) {
+        fprintf(stderr, "error: GetWindowsDirectory call failed\n");
+        exit(1);
+    }
+    const wchar_t *const kPart32 = L"\\System32\\";
+    const auto path = [&](const wchar_t *part) -> std::wstring {
+        return std::wstring(windir.data()) + part + name;
+    };
+#if defined(__x86_64__)
+    const auto ret = path(kPart32);
+    if (pathExists(ret)) {
+        return ret;
+    } else {
+        fprintf(stderr, "error: '%ls' does not exist\n", ret.c_str());
+        fprintf(stderr, "note: Ubuntu-on-Windows must be installed\n");
+        exit(1);
+    }
+#elif defined(__i386__)
+    const wchar_t *const kPartNat = L"\\Sysnative\\";
+    const auto pathNat = path(kPartNat);
+    if (pathExists(pathNat)) {
+        return std::move(pathNat);
+    }
+    const auto path32 = path(kPart32);
+    if (pathExists(path32)) {
+        return std::move(path32);
+    }
+    fprintf(stderr, "error: neither '%ls' nor '%ls' exist\n",
+        pathNat.c_str(), path32.c_str());
+    fprintf(stderr, "note: Ubuntu-on-Windows must be installed\n");
+    exit(1);
+#else
+    #error "Could not determine architecture"
+#endif
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char *argv[]) {
     setlocale(LC_ALL, "");
 
     struct sigaction sa = {};
@@ -454,8 +493,7 @@ int main() {
 
     const auto initialSize = terminalSize();
     const std::string key = randomString();
-    const std::wstring bashPath = L"C:\\windows\\system32\\bash.exe";
-    const std::wstring cmdPath = L"C:\\windows\\system32\\cmd.exe";
+    const std::wstring bashPath = findSystemProgram(L"bash.exe");
     const std::wstring backendPath = convertPathToWsl(findBackendProgram());
     std::wstring cmdline =
         bashPath + L" -c \"" +
@@ -472,6 +510,7 @@ int main() {
     std::wstring appPath = bashPath;
 
     if (kUseCmdToDebug) {
+        const std::wstring cmdPath = findSystemProgram(L"cmd.exe");
         cmdline = cmdPath + L" /k " + cmdline;
         appPath = cmdPath;
     }
