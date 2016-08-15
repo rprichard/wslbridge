@@ -51,7 +51,7 @@ void setSocketNoDelay(int s) {
 }
 
 WakeupFd::WakeupFd() {
-    int iResult = pipe2(fds_, O_NONBLOCK);
+    int iResult = pipe2(fds_, O_NONBLOCK | O_CLOEXEC);
     if (iResult != 0) {
         perror("pipe2 failed");
         exit(1);

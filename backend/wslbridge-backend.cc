@@ -24,7 +24,7 @@
 namespace {
 
 static int connectSocket(int port, const std::string &key) {
-    const int s = socket(AF_INET, SOCK_STREAM, 0);
+    const int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
 
     setSocketNoDelay(s);
 

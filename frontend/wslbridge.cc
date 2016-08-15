@@ -62,7 +62,7 @@ private:
 };
 
 Socket::Socket() {
-    s_ = socket(AF_INET, SOCK_STREAM, 0);
+    s_ = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     assert(s_ >= 0);
 
     setSocketNoDelay(s_);
