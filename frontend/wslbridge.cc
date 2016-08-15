@@ -506,39 +506,6 @@ private:
     std::vector<std::pair<std::wstring, std::wstring>> pairs_;
 };
 
-// Make an argument suitable for addition to a Win32 CreateProcess command-line
-// following the escaping convention documented on MSDN.  (e.g. See
-// CommandLineToArgvW documentation.)
-static void appendWinArg(std::wstring &out, const std::wstring &arg) {
-    if (!out.empty()) {
-        out.push_back(L' ');
-    }
-    const bool quote = arg.find_first_of(L" \t") != std::wstring::npos || arg.empty();
-    if (quote) {
-        out.push_back(L'\"');
-    }
-    int bsCount = 0;
-    for (wchar_t ch : arg) {
-        if (ch == L'\\') {
-            ++bsCount;
-        } else if (ch == L'\"') {
-            out.append(bsCount * 2 + 1, L'\\');
-            out.push_back(L'\"');
-            bsCount = 0;
-        } else {
-            out.append(bsCount, L'\\');
-            bsCount = 0;
-            out.push_back(ch);
-        }
-    }
-    if (quote) {
-        out.append(bsCount * 2, L'\\');
-        out.push_back(L'\"');
-    } else {
-        out.append(bsCount, L'\\');
-    }
-}
-
 static void appendBashArg(std::wstring &out, const std::wstring &arg) {
     if (!out.empty()) {
         out.push_back(L' ');
@@ -670,9 +637,10 @@ int main(int argc, char *argv[]) {
     }
 
     std::wstring cmdLine;
-    appendWinArg(cmdLine, bashPath);
-    appendWinArg(cmdLine, L"-c");
-    appendWinArg(cmdLine, bashCmdLine);
+    cmdLine.append(L"\"");
+    cmdLine.append(bashPath);
+    cmdLine.append(L"\" -c ");
+    appendBashArg(cmdLine, bashCmdLine);
 
     STARTUPINFOW sui = {};
     sui.cb = sizeof(sui);
