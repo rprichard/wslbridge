@@ -25,24 +25,20 @@
 
 #define BACKEND_PROGRAM "wslbridge-backend"
 
-const int32_t kOutputWindowSize = 8192;
-
 // SystemFunction036 is also known as RtlGenRandom.  It might be possible to
 // replace this with getentropy, if not now, then later.
 extern "C" BOOLEAN WINAPI SystemFunction036(PVOID, ULONG);
 
 namespace {
 
-static WakeupFd g_wakeupFd;
+const int32_t kOutputWindowSize = 8192;
 
-static void registerResizeSignalHandler() {
-    struct sigaction sa = {};
-    sa.sa_handler = [](int signo) {
-        g_wakeupFd.set();
-    };
-    sa.sa_flags = SA_RESTART;
-    ::sigaction(SIGWINCH, &sa, nullptr);
-}
+struct SavedTermiosMode {
+    bool valid;
+    termios mode[2];
+};
+
+static WakeupFd g_wakeupFd;
 
 static TermSize terminalSize() {
     winsize ws = {};
@@ -158,13 +154,29 @@ static int acceptClientAndAuthenticate(Socket &socket, const std::string &key) {
     return cs;
 }
 
-struct SavedTermiosMode {
-    termios mode[2];
+class TerminalState {
+private:
+    std::mutex mutex_;
+    bool inRawMode_ = false;
+    termios mode_[2] = {};
+
+public:
+    void enterRawMode();
+
+private:
+    void leaveRawMode(const std::lock_guard<std::mutex> &lock);
+
+public:
+    void fatal(const char *msg);
+    void exitCleanly(int exitStatus);
 };
 
 // Put the input terminal into non-canonical mode.
-static SavedTermiosMode setRawTerminalMode() {
-    SavedTermiosMode ret = {};
+void TerminalState::enterRawMode() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    assert(!inRawMode_);
+    inRawMode_ = true;
     const char *const kNames[2] = { "stdin", "stdout" };
 
     for (int i = 0; i < 2; ++i) {
@@ -173,7 +185,7 @@ static SavedTermiosMode setRawTerminalMode() {
             fprintf(stderr, "%s is not a tty\n", kNames[i]);
             exit(1);
         }
-        if (tcgetattr(i, &ret.mode[i]) < 0) {
+        if (tcgetattr(i, &mode_[i]) < 0) {
             perror("tcgetattr failed");
             exit(1);
         }
@@ -211,18 +223,35 @@ static SavedTermiosMode setRawTerminalMode() {
             exit(1);
         }
     }
-
-    return ret;
 }
 
-static void restoreTerminalMode(const SavedTermiosMode &original) {
+void TerminalState::leaveRawMode(const std::lock_guard<std::mutex> &lock) {
+    if (!inRawMode_) {
+        return;
+    }
     for (int i = 0; i < 2; ++i) {
-        if (tcsetattr(i, TCSAFLUSH, &original.mode[i]) < 0) {
+        if (tcsetattr(i, TCSAFLUSH, &mode_[i]) < 0) {
             perror("error restoring terminal mode");
             exit(1);
         }
     }
 }
+
+// This function cannot be used from a signal handler.
+void TerminalState::fatal(const char *msg) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    leaveRawMode(lock);
+    fprintf(stderr, "\n%s\n", msg);
+    exit(1);
+}
+
+void TerminalState::exitCleanly(int exitStatus) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    leaveRawMode(lock);
+    exit(exitStatus);
+}
+
+static TerminalState g_terminalState;
 
 struct IoLoop {
     std::mutex mutex;
@@ -232,11 +261,15 @@ struct IoLoop {
     int childExitStatus = -1;
 };
 
+static void fatalConnectionBroken() {
+    g_terminalState.fatal("connection broken");
+}
+
 static void writePacket(IoLoop &ioloop, const Packet &p) {
-    std::lock_guard<std::mutex> guard(ioloop.mutex);
+    std::lock_guard<std::mutex> lock(ioloop.mutex);
     if (!writeAllRestarting(ioloop.controlSocketFd,
             reinterpret_cast<const char*>(&p), sizeof(p))) {
-        connectionBrokenAbort();
+        fatalConnectionBroken();
     }
 }
 
@@ -245,7 +278,7 @@ static void ptyToSocketThread(int socketFd) {
     while (true) {
         const ssize_t amt1 = readRestarting(STDIN_FILENO, buf.data(), buf.size());
         if (amt1 <= 0) {
-            connectionBrokenAbort();
+            fatalConnectionBroken();
         }
         // If the backend shuts down the socket due to end-of-stream, this
         // write could fail.  In that case, ignore the failure, but continue to
@@ -260,16 +293,16 @@ static void socketToPtyThread(IoLoop *ioloop, int socketFd) {
     while (true) {
         const ssize_t amt1 = readRestarting(socketFd, buf.data(), buf.size());
         if (amt1 == 0) {
-            std::lock_guard<std::mutex> guard(ioloop->mutex);
+            std::lock_guard<std::mutex> lock(ioloop->mutex);
             ioloop->ioFinished = true;
             g_wakeupFd.set();
             break;
         }
         if (amt1 < 0) {
-            connectionBrokenAbort();
+            fatalConnectionBroken();
         }
         if (!writeAllRestarting(STDOUT_FILENO, buf.data(), amt1)) {
-            connectionBrokenAbort();
+            fatalConnectionBroken();
         }
         bytesWritten += amt1;
         if (bytesWritten >= kOutputWindowSize / 2) {
@@ -283,7 +316,7 @@ static void socketToPtyThread(IoLoop *ioloop, int socketFd) {
 
 static void handlePacket(IoLoop *ioloop, const Packet &p) {
     if (p.type == Packet::Type::ChildExitStatus) {
-        std::lock_guard<std::mutex> guard(ioloop->mutex);
+        std::lock_guard<std::mutex> lock(ioloop->mutex);
         ioloop->childReaped = true;
         ioloop->childExitStatus = p.u.exitStatus;
         g_wakeupFd.set();
@@ -291,12 +324,13 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
 }
 
 static void mainLoop(int controlSocketFd, int dataSocketFd, TermSize termSize) {
-    const auto termMode = setRawTerminalMode();
+    g_terminalState.enterRawMode();
     IoLoop ioloop;
     ioloop.controlSocketFd = controlSocketFd;
     std::thread p2s(ptyToSocketThread, dataSocketFd);
     std::thread s2p(socketToPtyThread, &ioloop, dataSocketFd);
-    std::thread rcs(readControlSocketThread<IoLoop, handlePacket>, controlSocketFd, &ioloop);
+    std::thread rcs(readControlSocketThread<IoLoop, handlePacket, fatalConnectionBroken>,
+                    controlSocketFd, &ioloop);
     int32_t exitStatus = -1;
 
     while (true) {
@@ -307,7 +341,7 @@ static void mainLoop(int controlSocketFd, int dataSocketFd, TermSize termSize) {
             p.u.termSize = termSize = newSize;
             writePacket(ioloop, p);
         }
-        std::lock_guard<std::mutex> guard(ioloop.mutex);
+        std::lock_guard<std::mutex> lock(ioloop.mutex);
         if (ioloop.childReaped && ioloop.ioFinished) {
             exitStatus = ioloop.childExitStatus;
             break;
@@ -317,12 +351,10 @@ static void mainLoop(int controlSocketFd, int dataSocketFd, TermSize termSize) {
     // Socket-to-pty I/O is finished already.
     s2p.join();
 
-    restoreTerminalMode(termMode);
-
     // We can't return, because the threads could still be running.  Rather
     // than shut them down gracefully, which seems hard(?), just let the OS
     // clean everything up.
-    exit(exitStatus);
+    g_terminalState.exitCleanly(exitStatus);
 }
 
 static bool pathExists(const std::wstring &path) {
@@ -410,7 +442,10 @@ std::wstring convertPathToWsl(const std::wstring &path) {
 int main() {
     setlocale(LC_ALL, "");
 
-    registerResizeSignalHandler();
+    struct sigaction sa = {};
+    sa.sa_handler = [](int signo) { g_wakeupFd.set(); };
+    sa.sa_flags = SA_RESTART;
+    ::sigaction(SIGWINCH, &sa, nullptr);
 
     Socket controlSocket;
     Socket dataSocket;
@@ -449,6 +484,13 @@ int main() {
         kUseCmdToDebug ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW,
         nullptr, nullptr, &sui, &pi);
     assert(success && "CreateProcess failed");
+
+    // If the backend process exits before the frontend, then something has
+    // gone wrong.
+    const auto watchdog = std::thread([=]() {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        g_terminalState.fatal("backend process died");
+    });
 
     const int controlSocketC = acceptClientAndAuthenticate(controlSocket, key);
     const int dataSocketC = acceptClientAndAuthenticate(dataSocket, key);

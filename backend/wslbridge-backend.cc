@@ -73,6 +73,11 @@ struct IoLoop {
     WindowParams windowParams = {};
 };
 
+static void connectionBrokenAbort() {
+    fprintf(stderr, "error: connection broken\n");
+    exit(1);
+}
+
 static void writePacket(IoLoop &ioloop, const Packet &p) {
     if (!writeAllRestarting(ioloop.controlSocketFd,
             reinterpret_cast<const char*>(&p), sizeof(p))) {
@@ -147,7 +152,7 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
                 const int32_t iw = p.u.windowAmount;
                 assert(cw >= 0 && cw <= max &&
                        iw >= 0 && iw <= max - cw);
-                std::lock_guard<std::mutex> guard(ioloop->windowMutex);
+                std::lock_guard<std::mutex> lock(ioloop->windowMutex);
                 ioloop->window += iw;
             }
             ioloop->windowIncrease.notify_one();
@@ -169,7 +174,8 @@ static void mainLoop(int controlSocketFd, int dataSocketFd, Child child,
     ioloop.windowParams = windowParams;
     std::thread s2p(socketToPtyThread, &ioloop, dataSocketFd);
     std::thread p2s(ptyToSocketThread, &ioloop, dataSocketFd);
-    std::thread rcs(readControlSocketThread<IoLoop, handlePacket>, controlSocketFd, &ioloop);
+    std::thread rcs(readControlSocketThread<IoLoop, handlePacket, connectionBrokenAbort>,
+                    controlSocketFd, &ioloop);
 
     // Block until the child process finishes, then notify the frontend of
     // child exit.

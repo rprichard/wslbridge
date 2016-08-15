@@ -66,12 +66,7 @@ private:
     int fds_[2];
 };
 
-inline void connectionBrokenAbort() {
-    fprintf(stderr, "error: connection broken\n");
-    exit(1);
-}
-
-template <typename T, void packetHandlerFunc(T*, const Packet&)>
+template <typename T, void packetHandlerFunc(T*, const Packet&), void readFailure()>
 void readControlSocketThread(int controlSocketFd, T *userObj) {
     std::array<Packet, 256> buf;
     char *const bufRaw = reinterpret_cast<char*>(&buf);
@@ -81,7 +76,7 @@ void readControlSocketThread(int controlSocketFd, T *userObj) {
                                            &bufRaw[accum],
                                            sizeof(buf) - accum);
         if (amt <= 0) {
-            connectionBrokenAbort();
+            readFailure();
         }
         accum += amt;
         assert(accum <= sizeof(buf));
