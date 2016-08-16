@@ -274,6 +274,7 @@ void TerminalState::exitCleanly(int exitStatus) {
 static TerminalState g_terminalState;
 
 struct IoLoop {
+    std::string spawnProgName;
     bool usePty = false;
     std::mutex mutex;
     bool ioFinished = false;
@@ -361,7 +362,7 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
             if (p.u.spawnError.type == SpawnError::Type::ForkPtyFailed) {
                 msg = "error: forkpty failed: ";
             } else {
-                msg = "error: could not start process: ";
+                msg = "error: could not start '" + ioloop->spawnProgName + "': ";
             }
             msg += errorString(p.u.spawnError.error);
             g_terminalState.fatal("%s\n", msg.c_str());
@@ -374,10 +375,12 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
     }
 }
 
-static void mainLoop(bool usePty, int controlSocketFd,
+static void mainLoop(const std::string &spawnProgName,
+                     bool usePty, int controlSocketFd,
                      int inputSocketFd, int outputSocketFd, int errorSocketFd,
                      TermSize termSize) {
     IoLoop ioloop;
+    ioloop.spawnProgName = spawnProgName;
     ioloop.usePty = usePty;
     ioloop.controlSocketFd = controlSocketFd;
     std::thread p2s(parentToSocketThread, inputSocketFd);
@@ -800,8 +803,17 @@ int main(int argc, char *argv[]) {
         appendBashArg(bashCmdLine, L"-e" + envPair.first + L"=" + envPair.second);
     }
     appendBashArg(bashCmdLine, L"--");
-    for (int i = optind; i < argc; ++i) {
-        appendBashArg(bashCmdLine, mbsToWcs(argv[i]));
+
+    std::string spawnProgName;
+    if (optind == argc) {
+        // No command-line specified.  Use a default one.
+        spawnProgName = "/bin/bash";
+        appendBashArg(bashCmdLine, L"/bin/bash");
+    } else {
+        spawnProgName = argv[optind];
+        for (int i = optind; i < argc; ++i) {
+            appendBashArg(bashCmdLine, mbsToWcs(argv[i]));
+        }
     }
 
     std::wstring cmdLine;
@@ -842,7 +854,8 @@ int main(int argc, char *argv[]) {
         g_terminalState.enterRawMode();
     }
 
-    mainLoop(usePty, controlSocketC,
+    mainLoop(spawnProgName,
+             usePty, controlSocketC,
              inputSocketC, outputSocketC, errorSocketC,
              initialSize);
     return 0;

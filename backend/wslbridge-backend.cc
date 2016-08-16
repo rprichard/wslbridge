@@ -505,6 +505,10 @@ int main(int argc, char *argv[]) {
     for (int i = optind; i < argc; ++i) {
         childParams.argv.push_back(argv[i]);
     }
+    if (childParams.argv.empty()) {
+        fatal("error: no command line given\n");
+    }
+    childParams.argv.push_back(nullptr);
 
     optionRequired("--pty/--pipes", ptyMode, -1);
     optionRequired("-3", controlSocketPort, -1);
@@ -524,10 +528,6 @@ int main(int argc, char *argv[]) {
     optionRequired("-t", windowThreshold, -1);
 
     childParams.usePty = ptyMode;
-    if (childParams.argv.empty()) {
-        childParams.argv.push_back(strdup("/bin/bash"));
-    }
-    childParams.argv.push_back(nullptr);
 
     const WindowParams windowParams = { windowSize, windowThreshold };
     assert(windowParams.size >= 1);
