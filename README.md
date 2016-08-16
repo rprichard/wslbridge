@@ -1,7 +1,8 @@
 # wslbridge
 
-wslbridge is a Cygwin program that connects to a WSL (Windows Subsystem for
-Linux) pty over TCP sockets.
+wslbridge is a Cygwin program that allows connecting to the WSL command-line
+environment over TCP sockets, as with ssh, but without the overhead of
+configuring an SSH server.
 
 ## Building wslbridge
 
@@ -19,13 +20,24 @@ In WSL/Linux:
     $ cd backend
     make
 
-The Cygwin frontend program is written to `out/wslbridge`.  The ELF64 backend
-program is written to `out/wslbridge-backend`.  The files can be copied
+The Cygwin frontend program is written to `out/wslbridge.exe`.  The ELF64
+backend program is written to `out/wslbridge-backend`.  The files can be copied
 somewhere more convenient, but they need to be on a letter drive (e.g. not a
-`\\server\share\...` UNC path).  They probably need to be on an NTFS volume.
-The frontend looks for the backend in its own directory.
+`\\server\share\...` UNC path).  They also need to be on an NTFS volume.  The
+frontend looks for the backend in its own directory.
 
-Run `wslbridge` to start a bash session in WSL.
+## Usage
+
+Usage is similar to that of `ssh`.  Run `wslbridge` with no arguments to start
+a bash session in a WSL pty.  Append a command-line to run that command in WSL
+without a pty (i.e. using 3 pipes for stdio).
+
+`wslbridge` runs its WSL command with either a pty or using pipes.  Pass `-t`
+to enable pty mode or `-T` to enable pipe mode.  Pass `-t -t` to force pty mode
+even if stdin is not a terminal.
+
+Pass `-eVAR=VAL` to set an environment variable within WSL.  Pass just `-eVAR`
+to copy the value from the Cygwin environment.
 
 ## Copyright
 

@@ -35,12 +35,16 @@ namespace {
 
 const int32_t kOutputWindowSize = 8192;
 
+// XXX: Use a pointer to prevent dtor on exit.
 static WakeupFd g_wakeupFd;
 
 static TermSize terminalSize() {
     winsize ws = {};
-    ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
-    return TermSize { ws.ws_col, ws.ws_row };
+    if (isatty(STDIN_FILENO) && ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == 0) {
+        return TermSize { ws.ws_col, ws.ws_row };
+    } else {
+        return TermSize { 80, 24 };
+    }
 }
 
 class Socket {
@@ -166,6 +170,7 @@ class TerminalState {
 private:
     std::mutex mutex_;
     bool inRawMode_ = false;
+    bool modeValid_[2] = {false, false};
     termios mode_[2] = {};
 
 public:
@@ -188,19 +193,19 @@ void TerminalState::enterRawMode() {
 
     assert(!inRawMode_);
     inRawMode_ = true;
-    const char *const kNames[2] = { "stdin", "stdout" };
 
     for (int i = 0; i < 2; ++i) {
-        // XXX: These restrictions are probably excessive?
         if (!isatty(i)) {
-            fatal("%s is not a tty\n", kNames[i]);
-        }
-        if (tcgetattr(i, &mode_[i]) < 0) {
-            fatalPerror("tcgetattr failed");
+            modeValid_[i] = false;
+        } else {
+            if (tcgetattr(i, &mode_[i]) < 0) {
+                fatalPerror("tcgetattr failed");
+            }
+            modeValid_[i] = true;
         }
     }
 
-    {
+    if (modeValid_[0]) {
         termios buf;
         if (tcgetattr(0, &buf) < 0) {
             fatalPerror("tcgetattr failed");
@@ -216,7 +221,7 @@ void TerminalState::enterRawMode() {
         }
     }
 
-    {
+    if (modeValid_[1]) {
         termios buf;
         if (tcgetattr(1, &buf) < 0) {
             fatalPerror("tcgetattr failed");
@@ -235,8 +240,10 @@ void TerminalState::leaveRawMode(const std::lock_guard<std::mutex> &lock) {
         return;
     }
     for (int i = 0; i < 2; ++i) {
-        if (tcsetattr(i, TCSAFLUSH, &mode_[i]) < 0) {
-            fatalPerror("error restoring terminal mode");
+        if (modeValid_[i]) {
+            if (tcsetattr(i, TCSAFLUSH, &mode_[i]) < 0) {
+                fatalPerror("error restoring terminal mode");
+            }
         }
     }
 }
@@ -268,6 +275,7 @@ void TerminalState::exitCleanly(int exitStatus) {
 static TerminalState g_terminalState;
 
 struct IoLoop {
+    bool usePty = false;
     std::mutex mutex;
     bool ioFinished = false;
     int controlSocketFd = -1;
@@ -287,21 +295,23 @@ static void writePacket(IoLoop &ioloop, const Packet &p) {
     }
 }
 
-static void ptyToSocketThread(int socketFd) {
+static void parentToSocketThread(int socketFd) {
     std::array<char, 8192> buf;
     while (true) {
         const ssize_t amt1 = readRestarting(STDIN_FILENO, buf.data(), buf.size());
         if (amt1 <= 0) {
-            fatalConnectionBroken();
+            // If we reach EOF reading from stdin, propagate EOF to the child.
+            close(socketFd);
+            break;
         }
-        // If the backend shuts down the socket due to end-of-stream, this
-        // write could fail.  In that case, ignore the failure, but continue to
-        // flush I/O from the pty.
-        writeAllRestarting(socketFd, buf.data(), amt1);
+        if (!writeAllRestarting(socketFd, buf.data(), amt1)) {
+            // We don't propagate EOF backwards, but we do let data build up.
+            break;
+        }
     }
 }
 
-static void socketToPtyThread(IoLoop *ioloop, int socketFd) {
+static void socketToParentThread(IoLoop *ioloop, bool isErrorPipe, int socketFd, int outFd) {
     uint32_t bytesWritten = 0;
     std::array<char, 32 * 1024> buf;
     while (true) {
@@ -313,15 +323,25 @@ static void socketToPtyThread(IoLoop *ioloop, int socketFd) {
             break;
         }
         if (amt1 < 0) {
-            fatalConnectionBroken();
+            break;
         }
-        if (!writeAllRestarting(STDOUT_FILENO, buf.data(), amt1)) {
-            fatalConnectionBroken();
+        if (!writeAllRestarting(outFd, buf.data(), amt1)) {
+            if (!ioloop->usePty && !isErrorPipe) {
+                // ssh seems to propagate an stdout EOF backwards to the remote
+                // program, so do the same thing.  It doesn't do this for
+                // stderr, though, where the remote process is allowed to block
+                // forever.
+                Packet p = { Packet::Type::CloseStdoutPipe };
+                writePacket(*ioloop, p);
+            }
+            shutdown(socketFd, SHUT_RDWR);
+            break;
         }
         bytesWritten += amt1;
         if (bytesWritten >= kOutputWindowSize / 2) {
             Packet p = { Packet::Type::IncreaseWindow };
-            p.u.windowAmount = bytesWritten;
+            p.u.window.amount = bytesWritten;
+            p.u.window.isErrorPipe = isErrorPipe;
             writePacket(*ioloop, p);
             bytesWritten = 0;
         }
@@ -355,12 +375,19 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
     }
 }
 
-static void mainLoop(int controlSocketFd, int dataSocketFd, TermSize termSize) {
-    g_terminalState.enterRawMode();
+static void mainLoop(bool usePty, int controlSocketFd,
+                     int inputSocketFd, int outputSocketFd, int errorSocketFd,
+                     TermSize termSize) {
     IoLoop ioloop;
+    ioloop.usePty = usePty;
     ioloop.controlSocketFd = controlSocketFd;
-    std::thread p2s(ptyToSocketThread, dataSocketFd);
-    std::thread s2p(socketToPtyThread, &ioloop, dataSocketFd);
+    std::thread p2s(parentToSocketThread, inputSocketFd);
+    std::thread s2p(socketToParentThread, &ioloop, false, outputSocketFd, STDOUT_FILENO);
+    std::unique_ptr<std::thread> es2p;
+    if (errorSocketFd != -1) {
+        es2p = std::unique_ptr<std::thread>(
+            new std::thread(socketToParentThread, &ioloop, true, errorSocketFd, STDERR_FILENO));
+    }
     std::thread rcs(readControlSocketThread<IoLoop, handlePacket, fatalConnectionBroken>,
                     controlSocketFd, &ioloop);
     int32_t exitStatus = -1;
@@ -510,6 +537,9 @@ static void usage(const char *prog) {
     printf("Options:\n");
     printf("  -e VAR        Copies VAR into the WSL environment.\n");
     printf("  -e VAR=VAL    Sets VAR to VAL in the WSL environment.\n");
+    printf("  -T            Do not use a pty.\n");
+    printf("  -t            Use a pty (as long as stdin is a tty).\n");
+    printf("  -t -t         Force a pty (even if stdin is not a tty).\n");
     exit(0);
 }
 
@@ -524,6 +554,15 @@ public:
 
     void set(const std::string &var, const std::string &value) {
         pairs_.push_back(std::make_pair(mbsToWcs(var), mbsToWcs(value)));
+    }
+
+    bool hasVar(const std::wstring &var) {
+        for (const auto &pair : pairs_) {
+            if (pair.first == var) {
+                return true;
+            }
+        }
+        return false;
     }
 
     const std::vector<std::pair<std::wstring, std::wstring>> &pairs() { return pairs_; }
@@ -637,15 +676,20 @@ int main(int argc, char *argv[]) {
     setlocale(LC_ALL, "");
 
     Environment env;
-    env.set("TERM");
+    enum class TtyRequest { Auto, Yes, No, Force } ttyRequest = TtyRequest::Auto;
 
+    int debugFork = 0;
     int c = 0;
     const struct option kOptionTable[] = {
-        { "help", false, nullptr, 'h' },
-        { nullptr,  false, nullptr, 0 },
+        { "help",           false, nullptr,     'h' },
+        { "debug-fork",     false, &debugFork,  1   },
+        { nullptr,          false, nullptr,     0   },
     };
-    while ((c = getopt_long(argc, argv, "+e:", kOptionTable, nullptr)) != -1) {
+    while ((c = getopt_long(argc, argv, "+e:tT", kOptionTable, nullptr)) != -1) {
         switch (c) {
+            case 0:
+                // Ignore long option.
+                break;
             case 'e': {
                 const char *eq = strchr(optarg, '=');
                 const auto varname = eq ? std::string(optarg, eq - optarg) : std::string(optarg);
@@ -662,8 +706,38 @@ int main(int argc, char *argv[]) {
             case 'h':
                 usage(argv[0]);
                 break;
+            case 't':
+                if (ttyRequest == TtyRequest::Yes) {
+                    ttyRequest = TtyRequest::Force;
+                } else {
+                    ttyRequest = TtyRequest::Yes;
+                }
+                break;
+            case 'T':
+                ttyRequest = TtyRequest::No;
+                break;
             default:
                 fatal("Try '%s --help' for more information.\n", argv[0]);
+        }
+    }
+
+    const bool hasCommand = optind < argc;
+    if (ttyRequest == TtyRequest::Auto) {
+        ttyRequest = hasCommand ? TtyRequest::No : TtyRequest::Yes;
+    }
+    if (ttyRequest == TtyRequest::Yes && !isatty(STDIN_FILENO)) {
+        fprintf(stderr, "Pseudo-terminal will not be allocated because stdin is not a terminal.\n");
+        ttyRequest = TtyRequest::No;
+    }
+    const bool usePty = ttyRequest != TtyRequest::No;
+
+    if (!env.hasVar(L"TERM")) {
+        // This seems to be what OpenSSH is doing.
+        if (usePty) {
+            const char *termVal = getenv("TERM");
+            env.set("TERM", termVal && *termVal ? termVal : "dumb");
+        } else {
+            env.set("TERM", "dumb");
         }
     }
 
@@ -673,9 +747,17 @@ int main(int argc, char *argv[]) {
     sa.sa_handler = [](int signo) { g_wakeupFd.set(); };
     sa.sa_flags = SA_RESTART;
     ::sigaction(SIGWINCH, &sa, nullptr);
+    sa = {};
+    // We want to handle EPIPE rather than receiving SIGPIPE.
+    signal(SIGPIPE, SIG_IGN);
 
     Socket controlSocket;
-    Socket dataSocket;
+    Socket inputSocket;
+    Socket outputSocket;
+    std::unique_ptr<Socket> errorSocket;
+    if (!usePty) {
+        errorSocket = std::unique_ptr<Socket>(new Socket);
+    }
 
     const std::wstring bashPath = findSystemProgram(L"bash.exe");
     const std::wstring backendPath = convertPathToWsl(findBackendProgram());
@@ -685,18 +767,35 @@ int main(int argc, char *argv[]) {
     // Prepare the backend command line.
     std::wstring bashCmdLine;
     appendBashArg(bashCmdLine, backendPath);
+    if (debugFork) {
+        appendBashArg(bashCmdLine, L"--debug-fork");
+    }
+
     std::array<wchar_t, 1024> buffer;
     int iRet = swprintf(buffer.data(), buffer.size(),
-                        L" -s%d -d%d -k%s -c%d -r%d -w%d -t%d",
+                        L" -3%d -0%d -1%d -k%s -w%d -t%d",
                         controlSocket.port(),
-                        dataSocket.port(),
+                        inputSocket.port(),
+                        outputSocket.port(),
                         key.c_str(),
-                        initialSize.cols,
-                        initialSize.rows,
                         kOutputWindowSize,
                         kOutputWindowSize / 4);
     assert(iRet > 0);
     bashCmdLine.append(buffer.data());
+
+    if (usePty) {
+        iRet = swprintf(buffer.data(), buffer.size(),
+                        L" --pty -c%d -r%d",
+                        initialSize.cols,
+                        initialSize.rows);
+    } else {
+        iRet = swprintf(buffer.data(), buffer.size(),
+                        L" --pipes -2%d",
+                        errorSocket->port());
+    }
+    assert(iRet > 0);
+    bashCmdLine.append(buffer.data());
+
     for (const auto &envPair : env.pairs()) {
         appendBashArg(bashCmdLine, L"-e" + envPair.first + L"=" + envPair.second);
     }
@@ -716,7 +815,7 @@ int main(int argc, char *argv[]) {
     PROCESS_INFORMATION pi = {};
     BOOL success = CreateProcessW(bashPath.c_str(), &cmdLine[0], nullptr, nullptr,
         false,
-        CREATE_NO_WINDOW,
+        debugFork ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW,
         nullptr, nullptr, &sui, &pi);
     if (!success) {
         fatal("error starting bash.exe adapter: %s\n",
@@ -731,10 +830,20 @@ int main(int argc, char *argv[]) {
     });
 
     const int controlSocketC = acceptClientAndAuthenticate(controlSocket, key);
-    const int dataSocketC = acceptClientAndAuthenticate(dataSocket, key);
+    const int inputSocketC = acceptClientAndAuthenticate(inputSocket, key);
+    const int outputSocketC = acceptClientAndAuthenticate(outputSocket, key);
+    const int errorSocketC = !errorSocket ? -1 : acceptClientAndAuthenticate(*errorSocket, key);
     controlSocket.close();
-    dataSocket.close();
+    inputSocket.close();
+    outputSocket.close();
+    if (errorSocket) { errorSocket->close(); }
 
-    mainLoop(controlSocketC, dataSocketC, initialSize);
+    if (usePty) {
+        g_terminalState.enterRawMode();
+    }
+
+    mainLoop(usePty, controlSocketC,
+             inputSocketC, outputSocketC, errorSocketC,
+             initialSize);
     return 0;
 }

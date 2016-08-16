@@ -84,11 +84,15 @@ struct Packet {
         SetSize,
         IncreaseWindow,
         SpawnFailed,
-        ChildExitStatus
+        ChildExitStatus,
+        CloseStdoutPipe
     } type;
     union {
         TermSize termSize;
-        int32_t windowAmount;
+        struct {
+            int32_t amount;
+            bool isErrorPipe;
+        } window;
         int32_t exitStatus;
         SpawnError spawnError;
     } u;
