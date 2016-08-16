@@ -159,7 +159,7 @@ void WakeupFd::wait() {
     do {
         FD_SET(readFd(), &fdset_);
         const int selectRet = select(readFd() + 1, &fdset_, nullptr, nullptr, nullptr);
-        if (selectRet < 0 && selectRet == EINTR) {
+        if (selectRet < 0 && errno == EINTR) {
             // Try again.
             continue;
         } else if (selectRet < 0) {
