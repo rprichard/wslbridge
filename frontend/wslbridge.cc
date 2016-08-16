@@ -35,8 +35,7 @@ namespace {
 
 const int32_t kOutputWindowSize = 8192;
 
-// XXX: Use a pointer to prevent dtor on exit.
-static WakeupFd g_wakeupFd;
+static WakeupFd *g_wakeupFd = nullptr;
 
 static TermSize terminalSize() {
     winsize ws = {};
@@ -319,7 +318,7 @@ static void socketToParentThread(IoLoop *ioloop, bool isErrorPipe, int socketFd,
         if (amt1 == 0) {
             std::lock_guard<std::mutex> lock(ioloop->mutex);
             ioloop->ioFinished = true;
-            g_wakeupFd.set();
+            g_wakeupFd->set();
             break;
         }
         if (amt1 < 0) {
@@ -354,7 +353,7 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
             std::lock_guard<std::mutex> lock(ioloop->mutex);
             ioloop->childReaped = true;
             ioloop->childExitStatus = p.u.exitStatus;
-            g_wakeupFd.set();
+            g_wakeupFd->set();
             break;
         }
         case Packet::Type::SpawnFailed: {
@@ -393,7 +392,7 @@ static void mainLoop(bool usePty, int controlSocketFd,
     int32_t exitStatus = -1;
 
     while (true) {
-        g_wakeupFd.wait();
+        g_wakeupFd->wait();
         const auto newSize = terminalSize();
         if (newSize != termSize) {
             Packet p = { Packet::Type::SetSize };
@@ -674,6 +673,7 @@ static std::string formatErrorMessage(DWORD err) {
 
 int main(int argc, char *argv[]) {
     setlocale(LC_ALL, "");
+    g_wakeupFd = new WakeupFd();
 
     Environment env;
     enum class TtyRequest { Auto, Yes, No, Force } ttyRequest = TtyRequest::Auto;
@@ -744,7 +744,7 @@ int main(int argc, char *argv[]) {
     // We must register this handler *before* determining the initial terminal
     // size.
     struct sigaction sa = {};
-    sa.sa_handler = [](int signo) { g_wakeupFd.set(); };
+    sa.sa_handler = [](int signo) { g_wakeupFd->set(); };
     sa.sa_flags = SA_RESTART;
     ::sigaction(SIGWINCH, &sa, nullptr);
     sa = {};
