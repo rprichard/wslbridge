@@ -686,6 +686,7 @@ int main(int argc, char *argv[]) {
     const struct option kOptionTable[] = {
         { "help",           false, nullptr,     'h' },
         { "debug-fork",     false, &debugFork,  1   },
+        { "version",        false, nullptr,     'v' },
         { nullptr,          false, nullptr,     0   },
     };
     while ((c = getopt_long(argc, argv, "+e:tT", kOptionTable, nullptr)) != -1) {
@@ -719,6 +720,9 @@ int main(int argc, char *argv[]) {
             case 'T':
                 ttyRequest = TtyRequest::No;
                 break;
+            case 'v':
+                printf("wslbridge " STRINGIFY(WSLBRIDGE_VERSION) "\n");
+                exit(0);
             default:
                 fatal("Try '%s --help' for more information.\n", argv[0]);
         }

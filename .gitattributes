@@ -2,6 +2,8 @@
 Makefile        text
 .gitattributes  text
 .gitignore      text
+*.bat           text
 *.cc            text
 *.h             text
-*.bat           text
+*.md            text
+*.txt           text

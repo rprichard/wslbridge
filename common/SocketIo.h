@@ -14,6 +14,9 @@
 #include <utility>
 #include <vector>
 
+#define XSTRINGIFY(x) #x
+#define STRINGIFY(x) XSTRINGIFY(x)
+
 void fatal(const char *fmt, ...)
     __attribute__((noreturn))
     __attribute__((format(printf, 1, 2)));

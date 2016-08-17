@@ -478,6 +478,7 @@ int main(int argc, char *argv[]) {
         // This debugging option is handled earlier.  Include it in this table
         // just to discard it.
         { "debug-fork",     false, nullptr,     0 },
+        { "version",        false, nullptr,     'v' },
         { nullptr,          false, nullptr,     0 },
     };
 
@@ -498,6 +499,9 @@ int main(int argc, char *argv[]) {
             case 'w': windowSize = atoi(optarg); break;
             case 't': windowThreshold = atoi(optarg); break;
             case 'e': childParams.env.push_back(strdup(optarg)); break;
+            case 'v':
+                printf("wslbridge-backend " STRINGIFY(WSLBRIDGE_VERSION) "\n");
+                exit(0);
             default:
                 exit(1);
         }
