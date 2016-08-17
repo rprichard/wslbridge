@@ -4,3 +4,4 @@ Makefile        text
 .gitignore      text
 *.cc            text
 *.h             text
+*.bat           text
