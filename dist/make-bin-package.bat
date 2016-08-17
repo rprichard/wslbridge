@@ -32,6 +32,10 @@ call :makeFrontend "cygwin64" "C:\cygwin64\bin"     "cygwin1.dll"   || exit /b 1
 call :makeFrontend "msys32"   "C:\msys32\usr\bin"   "msys-2.0.dll"  || exit /b 1
 call :makeFrontend "msys64"   "C:\msys64\usr\bin"   "msys-2.0.dll"  || exit /b 1
 
+echo ============= TAR FILES =============
+set PATH=C:\cygwin64\bin;%PATH%
+C:\cygwin64\bin\bash.exe -c "for p in out/packages/*; do printf '\n'$p'\n'; tar tfv $p; done"
+
 exit /b 0
 
 
@@ -56,21 +60,19 @@ copy out\wslbridge-backend %PackageDir% || exit /b 1
 
 powershell "[System.Diagnostics.FileVersionInfo]::GetVersionInfo(\"%2\" + \"\\\" + \"%3\") | Set-Content -Encoding ASCII out\CygDllVersion.txt" || exit /b 1
 
-copy README.md                     %PackageDir%                 || exit /b 1
-copy LICENSE.txt                   %PackageDir%                 || exit /b 1
-type out\CygDllVersion.txt      >> %PackageDir%\BuildInfo.txt   || exit /b 1
-type out\CygGccVersion.txt      >> %PackageDir%\BuildInfo.txt   || exit /b 1
-type out\WslGccVersion.txt      >> %PackageDir%\BuildInfo.txt   || exit /b 1
-
 :: Always use Cygwin tar to package the binary.  The MSYS2 tar will mark the
 :: backend executable because its POSIX emulation uses filetype to determine
 :: executability.  Cygwin, on the other hand, uses NTFS ACL entries.  If the
 :: MSYS2 package were then extracted using Cygwin tar, the backend file would
 :: have non-executable ACL entries, and WSL would refuse to run it.
+::
+:: Use bash.exe to copy files so the execute bit is left unset.
 set DistSavedPath=%PATH%
 set PATH=C:\cygwin64\bin;%PATH%
-C:\cygwin64\bin\chmod.exe -x %PackageDirM%/BuildInfo.txt || exit /b 1
-C:\cygwin64\bin\tar.exe cfz out/packages/%PackageName%.tar.gz --numeric-owner --owner=0 --group=0 -C out %PackageName% || exit /b 1
+C:\cygwin64\bin\bash.exe -c "cat README.md      | unix2dos  > %PackageDirM%/README.md"          || exit /b 1
+C:\cygwin64\bin\bash.exe -c "cat LICENSE.txt    | unix2dos  > %PackageDirM%/LICENSE.txt"        || exit /b 1
+C:\cygwin64\bin\bash.exe -c "cat out/CygDllVersion.txt out/CygGccVersion.txt out/WslGccVersion.txt | unix2dos.exe > %PackageDirM%/BuildInfo.txt" || exit /b 1
+C:\cygwin64\bin\tar.exe cfz out/packages/%PackageName%.tar.gz --numeric-owner --owner=0 --group=0 -C out %PackageName%  || exit /b 1
 set PATH=%DistSavedPath%
 
 exit /b 0
