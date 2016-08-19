@@ -60,7 +60,7 @@ copy out\wslbridge-backend %PackageDir% || exit /b 1
 
 powershell "[System.Diagnostics.FileVersionInfo]::GetVersionInfo(\"%2\" + \"\\\" + \"%3\") | Set-Content -Encoding ASCII out\CygDllVersion.txt" || exit /b 1
 
-:: Always use Cygwin tar to package the binary.  The MSYS2 tar will mark the
+:: Always use Cygwin tar to package the binary.  MSYS2 tar won't mark the
 :: backend executable because its POSIX emulation uses filetype to determine
 :: executability.  Cygwin, on the other hand, uses NTFS ACL entries.  If the
 :: MSYS2 package were then extracted using Cygwin tar, the backend file would
