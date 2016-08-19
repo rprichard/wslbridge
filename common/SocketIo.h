@@ -1,18 +1,16 @@
 #pragma once
 
 #include <assert.h>
-#include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
 #include <unistd.h>
 
 #include <array>
+#include <string>
 #include <utility>
-#include <vector>
 
 #define XSTRINGIFY(x) #x
 #define STRINGIFY(x) XSTRINGIFY(x)

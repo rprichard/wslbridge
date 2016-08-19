@@ -4,24 +4,29 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <locale.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
+#include <wchar.h>
 
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "../common/SocketIo.h"
 
