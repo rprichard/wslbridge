@@ -39,6 +39,12 @@ even if stdin is not a terminal.
 Pass `-eVAR=VAL` to set an environment variable within WSL.  Pass just `-eVAR`
 to copy the value from the Cygwin environment.
 
+## wsltty (mintty/wslbridge package)
+
+The mintty project provides [wsltty](https://github.com/mintty/wsltty), a
+standalone WSL terminal package containing mintty, wslbridge, and part of
+Cygwin (e.g. the runtime library).
+
 ## Copyright
 
 This project is distributed under the MIT license (see the `LICENSE` file in
