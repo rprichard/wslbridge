@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -456,7 +457,7 @@ static std::wstring getModuleFileName(HMODULE module) {
     return std::wstring(path);
 }
 
-std::wstring findBackendProgram() {
+static std::wstring findBackendProgram() {
     std::wstring progDir = dirname(getModuleFileName(getCurrentModule()));
     std::wstring ret = progDir + (L"\\" BACKEND_PROGRAM);
     if (!pathExists(ret)) {
@@ -466,21 +467,77 @@ std::wstring findBackendProgram() {
     return ret;
 }
 
-std::wstring convertPathToWsl(const std::wstring &path) {
-    const auto lowerDrive = [](wchar_t ch) -> wchar_t {
-        if (ch >= L'a' && ch <= L'z') {
-            return ch;
-        } else if (ch >= L'A' && ch <= 'Z') {
-            return ch - L'A' + L'a';
-        } else {
-            return L'\0';
+static wchar_t lowerDrive(wchar_t ch) {
+    if (ch >= L'a' && ch <= L'z') {
+        return ch;
+    } else if (ch >= L'A' && ch <= 'Z') {
+        return ch - L'A' + L'a';
+    } else {
+        return L'\0';
+    }
+}
+
+static std::pair<std::wstring, std::wstring>
+normalizePath(const std::wstring &path) {
+    const auto getFinalPathName = [&](HANDLE h) -> std::wstring {
+        std::wstring ret;
+        ret.resize(MAX_PATH + 1);
+        while (true) {
+            const auto sz = GetFinalPathNameByHandleW(h, &ret[0], ret.size(), 0);
+            if (sz == 0) {
+                fatal("error: GetFinalPathNameByHandle failed on '%s'",
+                    wcsToMbs(path).c_str());
+            } else if (sz < ret.size()) {
+                ret.resize(sz);
+                return ret;
+            } else {
+                assert(sz > ret.size());
+                ret.resize(sz);
+            }
         }
     };
+    const auto h = CreateFileW(
+        path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        fatal("error: could not open '%s'", wcsToMbs(path).c_str());
+    }
+    auto npath = getFinalPathName(h);
+    std::array<wchar_t, MAX_PATH + 1> fsname;
+    fsname.back() = L'\0';
+    if (!GetVolumeInformationByHandleW(
+            h, nullptr, 0, nullptr, nullptr, nullptr,
+            &fsname[0], fsname.size())) {
+        fsname[0] = L'\0';
+    }
+    CloseHandle(h);
+    // Example of GetFinalPathNameByHandle result:
+    //   \\?\C:\cygwin64\bin\wslbridge-backend
+    //   0123456
+    //   \\?\UNC\server\share\file
+    //   01234567
+    if (npath.size() >= 7 &&
+            npath.substr(0, 4) == L"\\\\?\\" &&
+            lowerDrive(npath[4]) &&
+            npath.substr(5, 2) == L":\\") {
+        // Strip off the atypical \\?\ prefix.
+        npath = npath.substr(4);
+    } else if (npath.substr(0, 8) == L"\\\\?\\UNC\\") {
+        // Strip off the \\\\?\\UNC\\ prefix and replace it with \\.
+        npath = L"\\\\" + npath.substr(8);
+    }
+    return std::make_pair(std::move(npath), fsname.data());
+}
+
+static std::wstring convertPathToWsl(const std::wstring &path) {
     const auto isSlash = [](wchar_t ch) -> bool {
         return ch == L'/' || ch == L'\\';
     };
     if (path.size() >= 3) {
-        const wchar_t drive = lowerDrive(path[0]);
+        const auto drive = lowerDrive(path[0]);
         if (drive && path[1] == L':' && isSlash(path[2])) {
             // Acceptable path.
             std::wstring ret = L"/mnt/";
@@ -495,12 +552,12 @@ std::wstring convertPathToWsl(const std::wstring &path) {
         }
     }
     fatal(
-        "Error: the backend program '%s' must be located on a "
-        "letter drive so WSL can access it with a /mnt/<LTR> path.\n",
+        "error: the backend program '%s' must be located on a "
+        "letter drive so WSL can access it with a /mnt/<LTR> path\n",
         wcsToMbs(path).c_str());
 }
 
-std::wstring findSystemProgram(const wchar_t *name) {
+static std::wstring findSystemProgram(const wchar_t *name) {
     std::array<wchar_t, MAX_PATH> windir;
     windir[0] = L'\0';
     if (GetWindowsDirectoryW(windir.data(), windir.size()) == 0) {
@@ -771,14 +828,17 @@ int main(int argc, char *argv[]) {
         errorSocket = std::unique_ptr<Socket>(new Socket);
     }
 
-    const std::wstring bashPath = findSystemProgram(L"bash.exe");
-    const std::wstring backendPath = convertPathToWsl(findBackendProgram());
+    const auto bashPath = findSystemProgram(L"bash.exe");
+    const auto backendPathInfo = normalizePath(findBackendProgram());
+    const auto backendPathWin = backendPathInfo.first;
+    const auto fsname = backendPathInfo.second;
+    const auto backendPathWsl = convertPathToWsl(backendPathWin);
     const auto initialSize = terminalSize();
-    const std::string key = randomString();
+    const auto key = randomString();
 
     // Prepare the backend command line.
     std::wstring bashCmdLine;
-    appendBashArg(bashCmdLine, backendPath);
+    appendBashArg(bashCmdLine, backendPathWsl);
     if (debugFork) {
         appendBashArg(bashCmdLine, L"--debug-fork");
     }
@@ -843,11 +903,30 @@ int main(int argc, char *argv[]) {
             formatErrorMessage(GetLastError()).c_str());
     }
 
+    std::atomic<bool> backendStarted = { false };
+
     // If the backend process exits before the frontend, then something has
     // gone wrong.
-    const auto watchdog = std::thread([=]() {
+    const auto watchdog = std::thread([&]() {
         WaitForSingleObject(pi.hProcess, INFINITE);
-        g_terminalState.fatal("\nwslbridge error: backend process died\n");
+        if (backendStarted) {
+            g_terminalState.fatal("\nwslbridge error: backend process died\n");
+        }
+        std::string msg = "wslbridge error: failed to start backend process\n";
+        msg.append("note: backend program is at '");
+        msg.append(wcsToMbs(backendPathWin));
+        msg.append("'\n");
+        if (access(wcsToMbs(backendPathWin).c_str(), X_OK) == -1 && errno == EACCES) {
+            msg.append("note: the backend file is not executable "
+                       "(use 'chmod +x' on it?)\n");
+        }
+        if (fsname != L"NTFS") {
+            msg.append("note: backend is on a volume of type '");
+            msg.append(wcsToMbs(fsname));
+            msg.append("', expected 'NTFS'\n"
+                       "note: WSL only supports local NTFS volumes\n");
+        }
+        g_terminalState.fatal("%s", msg.c_str());
     });
 
     const int controlSocketC = acceptClientAndAuthenticate(controlSocket, key);
@@ -862,6 +941,8 @@ int main(int argc, char *argv[]) {
     if (usePty) {
         g_terminalState.enterRawMode();
     }
+
+    backendStarted = true;
 
     mainLoop(spawnProgName,
              usePty, controlSocketC,
