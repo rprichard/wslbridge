@@ -1,4 +1,4 @@
-# Version next
+# Version 0.2.0 (2016-09-28)
 
 Changes since 0.1.0:
 
