@@ -280,6 +280,7 @@ void TerminalState::exitCleanly(int exitStatus) {
 static TerminalState g_terminalState;
 
 struct IoLoop {
+    std::string spawnCwd;
     std::string spawnProgName;
     bool usePty = false;
     std::mutex mutex;
@@ -365,10 +366,18 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
         }
         case Packet::Type::SpawnFailed: {
             std::string msg;
-            if (p.u.spawnError.type == SpawnError::Type::ForkPtyFailed) {
-                msg = "error: forkpty failed: ";
-            } else {
-                msg = "error: could not start '" + ioloop->spawnProgName + "': ";
+            switch (p.u.spawnError.type) {
+                case SpawnError::Type::ForkPtyFailed:
+                    msg = "error: forkpty failed: ";
+                    break;
+                case SpawnError::Type::ChdirFailed:
+                    msg = "error: could not chdir to '" + ioloop->spawnCwd + "': ";
+                    break;
+                case SpawnError::Type::ExecFailed:
+                    msg = "error: could not exec '" + ioloop->spawnProgName + "': ";
+                    break;
+                default:
+                    assert(false && "Unhandled SpawnError type");
             }
             msg += errorString(p.u.spawnError.error);
             g_terminalState.fatal("%s\n", msg.c_str());
@@ -381,11 +390,13 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
     }
 }
 
-static void mainLoop(const std::string &spawnProgName,
+static void mainLoop(const std::string &spawnCwd,
+                     const std::string &spawnProgName,
                      bool usePty, int controlSocketFd,
                      int inputSocketFd, int outputSocketFd, int errorSocketFd,
                      TermSize termSize) {
     IoLoop ioloop;
+    ioloop.spawnCwd = spawnCwd;
     ioloop.spawnProgName = spawnProgName;
     ioloop.usePty = usePty;
     ioloop.controlSocketFd = controlSocketFd;
@@ -599,6 +610,8 @@ static void usage(const char *prog) {
     printf("Runs a program within a Windows Subsystem for Linux (WSL) pty\n");
     printf("\n");
     printf("Options:\n");
+    printf("  -C WSLDIR     Changes the working directory to WSLDIR first.\n");
+    printf("                An initial '~' indicates the WSL home directory.\n");
     printf("  -e VAR        Copies VAR into the WSL environment.\n");
     printf("  -e VAR=VAL    Sets VAR to VAL in the WSL environment.\n");
     printf("  -T            Do not use a pty.\n");
@@ -741,6 +754,7 @@ int main(int argc, char *argv[]) {
     g_wakeupFd = new WakeupFd();
 
     Environment env;
+    std::string spawnCwd;
     enum class TtyRequest { Auto, Yes, No, Force } ttyRequest = TtyRequest::Auto;
 
     int debugFork = 0;
@@ -751,7 +765,7 @@ int main(int argc, char *argv[]) {
         { "version",        false, nullptr,     'v' },
         { nullptr,          false, nullptr,     0   },
     };
-    while ((c = getopt_long(argc, argv, "+e:tT", kOptionTable, nullptr)) != -1) {
+    while ((c = getopt_long(argc, argv, "+e:C:tT", kOptionTable, nullptr)) != -1) {
         switch (c) {
             case 0:
                 // Ignore long option.
@@ -769,6 +783,12 @@ int main(int argc, char *argv[]) {
                 }
                 break;
             }
+            case 'C':
+                spawnCwd = optarg;
+                if (spawnCwd.empty()) {
+                    fatal("error: the -C option requires a non-empty string argument");
+                }
+                break;
             case 'h':
                 usage(argv[0]);
                 break;
@@ -871,6 +891,9 @@ int main(int argc, char *argv[]) {
     for (const auto &envPair : env.pairs()) {
         appendBashArg(bashCmdLine, L"-e" + envPair.first + L"=" + envPair.second);
     }
+    if (!spawnCwd.empty()) {
+        appendBashArg(bashCmdLine, L"-C" + mbsToWcs(spawnCwd));
+    }
     appendBashArg(bashCmdLine, L"--");
 
     std::string spawnProgName;
@@ -944,7 +967,7 @@ int main(int argc, char *argv[]) {
 
     backendStarted = true;
 
-    mainLoop(spawnProgName,
+    mainLoop(spawnCwd, spawnProgName,
              usePty, controlSocketC,
              inputSocketC, outputSocketC, errorSocketC,
              initialSize);

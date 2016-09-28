@@ -54,12 +54,21 @@ static int connectSocket(int port, const std::string &key) {
     return s;
 }
 
+static std::string resolveCwd(const std::string &cwd) {
+    if (cwd == "~" || cwd.substr(0, 2) == "~/") {
+        const auto home = getenv("HOME") ?: "";
+        return home + cwd.substr(1);
+    }
+    return cwd;
+}
+
 struct ChildParams {
     bool usePty = false;
     int cols = -1;
     int rows = -1;
     std::vector<char*> env;
     std::vector<char*> argv;
+    std::string cwd;
 };
 
 struct Child {
@@ -174,29 +183,36 @@ static Child spawnChild(const ChildParams &params) {
 
     } else if (pid == 0) {
         // forked process
+        const auto childFailed = [&](SpawnError::Type type, int savedErrno) {
+            const SpawnError err = {
+                type,
+                bridgedError(savedErrno)
+            };
+            writeAllRestarting(spawnErrPipe.write.fd(), &err, sizeof(err));
+            _exit(1);
+        };
         spawnErrPipe.read.close();
         for (const auto &setting : params.env) {
             putenv(setting);
         }
+        if (!params.cwd.empty()) {
+            if (chdir(resolveCwd(params.cwd).c_str()) != 0) {
+                childFailed(SpawnError::Type::ChdirFailed, errno);
+            }
+        }
         execvp(params.argv[0], params.argv.data());
-        const int err = errno;
-        writeAllRestarting(spawnErrPipe.write.fd(), &err, sizeof(err));
-        abort();
+        childFailed(SpawnError::Type::ExecFailed, errno);
     }
 
     UniqueFd masterFd(masterFdRaw);
 
     spawnErrPipe.write.close();
 
-    int execErrno = -1;
-    if (readAllRestarting(spawnErrPipe.read.fd(), &execErrno, sizeof(execErrno))) {
+    SpawnError err = {};
+    if (readAllRestarting(spawnErrPipe.read.fd(), &err, sizeof(err))) {
         // The child exec call failed.
         int dummy = 0;
         waitpid(pid, &dummy, 0);
-        const SpawnError err = {
-            SpawnError::Type::ExecFailed,
-            bridgedError(execErrno)
-        };
         Child ret;
         ret.spawnError = err;
         return ret;
@@ -489,7 +505,7 @@ int main(int argc, char *argv[]) {
     };
 
     int ch = 0;
-    while ((ch = getopt_long(argc, argv, "+3:0:1:2:k:c:r:w:t:e:", kOptionTable, nullptr)) != -1) {
+    while ((ch = getopt_long(argc, argv, "+3:0:1:2:k:c:r:w:t:e:C:", kOptionTable, nullptr)) != -1) {
         switch (ch) {
             case 0:
                 // This is returned for the two long options.  getopt_long
@@ -505,6 +521,7 @@ int main(int argc, char *argv[]) {
             case 'w': windowSize = atoi(optarg); break;
             case 't': windowThreshold = atoi(optarg); break;
             case 'e': childParams.env.push_back(strdup(optarg)); break;
+            case 'C': childParams.cwd = optarg; break;
             case 'v':
                 printf("wslbridge-backend " STRINGIFY(WSLBRIDGE_VERSION) "\n");
                 exit(0);

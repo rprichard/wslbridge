@@ -72,7 +72,12 @@ struct BridgedError {
 };
 
 struct SpawnError {
-    enum class Type : int32_t { Success, ForkPtyFailed, ExecFailed } type;
+    enum class Type : int32_t {
+        Success = 0,
+        ForkPtyFailed,
+        ExecFailed,
+        ChdirFailed,
+    } type;
     BridgedError error;
 };
 
