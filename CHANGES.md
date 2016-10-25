@@ -1,3 +1,11 @@
+# Next Version
+
+Changes since 0.2.0
+
+ * The frontend now synchronizes the Cygwin environment with the Win32
+   environment before creating the WSL backend process.
+   https://github.com/mintty/wsltty/issues/14
+
 # Version 0.2.0 (2016-09-28)
 
 Changes since 0.1.0:

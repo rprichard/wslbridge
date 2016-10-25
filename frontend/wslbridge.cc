@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/cygwin.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -751,6 +752,7 @@ static std::string formatErrorMessage(DWORD err) {
 
 int main(int argc, char *argv[]) {
     setlocale(LC_ALL, "");
+    cygwin_internal(CW_SYNC_WINENV);
     g_wakeupFd = new WakeupFd();
 
     Environment env;
