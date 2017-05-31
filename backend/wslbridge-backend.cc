@@ -336,6 +336,10 @@ static void childToSocketThread(IoLoop *ioloop, bool isErrorPipe, int inputFd, i
     revokeFd(socketFd);
 }
 
+static void discardPacket(void*, const Packet&) {
+    // Do nothing.
+}
+
 static void handlePacket(IoLoop *ioloop, const Packet &p) {
     switch (p.type) {
         case Packet::Type::SetSize: {
@@ -442,6 +446,9 @@ static void mainLoop(bool usePty, int controlSocketFd,
         // Ensure that the parent thread outlives its child threads.  The program
         // should exit before all the worker threads finish.  Join rcs first, so
         // that ioloop.stdoutThread remains valid if handlePacket is called.
+        //
+        // The rcs thread doesn't end gracefully -- when the control socket
+        // reaches EOF, the backend process terminates.
         rcs.join();
         s2c.join();
         c2s.join();
@@ -450,6 +457,10 @@ static void mainLoop(bool usePty, int controlSocketFd,
         Packet p = { Packet::Type::SpawnFailed };
         p.u.spawnError = child.spawnError;
         writePacket(controlSocketFd, p);
+
+        // Keep the backend alive until the control socket closes.
+        readControlSocketThread<void, discardPacket, connectionBrokenAbort>(
+            controlSocketFd, nullptr);
     }
 }
 
