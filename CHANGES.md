@@ -1,3 +1,14 @@
+# Version 0.2.2 (2017-06-23)
+
+Changes since 0.2.1
+
+ * Fix a race condition affecting spawn failure.
+
+ * Capture and report errors from the Microsoft Bash Launcher (bash.exe).
+   In particular, don't hang if the user tries to simultaneously run elevated
+   and non-elevated WSL instances.
+   [#13](https://github.com/rprichard/wslbridge/issues/13)
+
 # Version 0.2.1 (2016-11-14)
 
 Changes since 0.2.0
