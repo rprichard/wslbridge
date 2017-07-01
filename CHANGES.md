@@ -1,3 +1,12 @@
+# Version 0.2.3 (2017-06-30)
+
+Changes since 0.2.2
+
+ * Binaries are linked with -static-libgcc and -static-libstdc++.
+
+ * Build the binaries with an Ubuntu 14.04 WSL installation.  The binaries
+   for 0.2.2 were built with Ubuntu 16.04, and do not work on 14.04.
+
 # Version 0.2.2 (2017-06-23)
 
 Changes since 0.2.1
