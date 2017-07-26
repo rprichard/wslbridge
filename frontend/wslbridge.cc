@@ -623,6 +623,9 @@ static void usage(const char *prog) {
     printf("  -T            Do not use a pty.\n");
     printf("  -t            Use a pty (as long as stdin is a tty).\n");
     printf("  -t -t         Force a pty (even if stdin is not a tty).\n");
+    printf("  --wsl-launcher WSL_LAUNCHER_EXE");
+    printf("                Invoke WSL_LAUNCHER_EXE to start the WSL process.\n");
+    printf("                Defaults to %%SystemRoot%%\\{System32,Sysnative}\\bash.exe.\n");
     exit(0);
 }
 
@@ -951,6 +954,7 @@ int main(int argc, char *argv[]) {
 
     Environment env;
     std::string spawnCwd;
+    std::string wslLauncherArg;
     enum class TtyRequest { Auto, Yes, No, Force } ttyRequest = TtyRequest::Auto;
 
     int debugFork = 0;
@@ -959,6 +963,7 @@ int main(int argc, char *argv[]) {
         { "help",           false, nullptr,     'h' },
         { "debug-fork",     false, &debugFork,  1   },
         { "version",        false, nullptr,     'v' },
+        { "wsl-launcher",   true,  nullptr,     'l' },
         { nullptr,          false, nullptr,     0   },
     };
     while ((c = getopt_long(argc, argv, "+e:C:tT", kOptionTable, nullptr)) != -1) {
@@ -1001,6 +1006,12 @@ int main(int argc, char *argv[]) {
             case 'v':
                 printf("wslbridge " STRINGIFY(WSLBRIDGE_VERSION) "\n");
                 exit(0);
+            case 'l':
+                wslLauncherArg = optarg;
+                if (wslLauncherArg.empty()) {
+                    fatal("error: the --wsl-launcher option requires a non-empty string argument");
+                }
+                break;
             default:
                 fatal("Try '%s --help' for more information.\n", argv[0]);
         }
@@ -1044,7 +1055,16 @@ int main(int argc, char *argv[]) {
         errorSocket = std::unique_ptr<Socket>(new Socket);
     }
 
-    const auto bashPath = findSystemProgram(L"bash.exe");
+    std::wstring bashPath;
+    if (wslLauncherArg.empty()) {
+        bashPath = findSystemProgram(L"bash.exe");
+    } else {
+        bashPath = mbsToWcs(wslLauncherArg);
+        if (!pathExists(bashPath)) {
+            fatal("error: --wsl-launcher argument '%s' does not exist",
+                wslLauncherArg.c_str());
+        }
+    }
     const auto backendPathInfo = normalizePath(findBackendProgram());
     const auto backendPathWin = backendPathInfo.first;
     const auto fsname = backendPathInfo.second;
