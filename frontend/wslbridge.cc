@@ -1186,7 +1186,8 @@ int main(int argc, char *argv[]) {
         debugFork ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW,
         nullptr, nullptr, &sui.StartupInfo, &pi);
     if (!success) {
-        fatal("error starting bash.exe adapter: %s\n",
+        fatal("error starting %s.exe adapter: %s\n",
+            (useWslExe ? "wsl" : "bash"),
             formatErrorMessage(GetLastError()).c_str());
     }
 
@@ -1232,7 +1233,11 @@ int main(int argc, char *argv[]) {
             }
         }
         if (!out.empty()) {
-            msg.append("note: bash.exe output: ");
+            if (useWslExe) {
+                msg.append("note: wsl.exe output: ");
+            } else {
+                msg.append("note: bash.exe output: ");
+            }
             msg.append(out);
             msg.push_back('\n');
         }
