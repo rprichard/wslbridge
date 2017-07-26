@@ -623,9 +623,10 @@ static void usage(const char *prog) {
     printf("  -T            Do not use a pty.\n");
     printf("  -t            Use a pty (as long as stdin is a tty).\n");
     printf("  -t -t         Force a pty (even if stdin is not a tty).\n");
-    printf("  --wsl-launcher WSL_LAUNCHER_EXE");
-    printf("                Invoke WSL_LAUNCHER_EXE to start the WSL process.\n");
-    printf("                Defaults to %%SystemRoot%%\\{System32,Sysnative}\\bash.exe.\n");
+    printf("  --distro-guid GUID");
+    printf("                Uses the WSL distribution identified by GUID.\n");
+    printf("                See HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\n");
+    printf("                for a list of distribution GUIDs.\n");
     exit(0);
 }
 
@@ -941,6 +942,32 @@ static std::string stripTrailing(std::string str) {
     return str;
 }
 
+// Ensure that the GUID is lower-case and surrounded with braces.
+// If the string isn't a valid GUID, then return an empty string.
+static std::string canonicalGuid(std::string guid) {
+    if (guid.size() == 38 && guid[0] == '{' && guid[37] == '}') {
+        // OK
+    } else if (guid.size() == 36) {
+        guid = '{' + guid + '}';
+    } else {
+        return {};
+    }
+    assert(guid.size() == 38);
+    for (size_t i = 1; i <= 36; ++i) {
+        if (i == 9 || i == 14 || i == 19 || i == 24) {
+            if (guid[i] != '-') {
+                return {};
+            }
+        } else {
+            guid[i] = tolower(guid[i]);
+            if (!isxdigit(guid[i])) {
+                return {};
+            }
+        }
+    }
+    return guid;
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -954,7 +981,7 @@ int main(int argc, char *argv[]) {
 
     Environment env;
     std::string spawnCwd;
-    std::string wslLauncherArg;
+    std::string distroGuid;
     enum class TtyRequest { Auto, Yes, No, Force } ttyRequest = TtyRequest::Auto;
 
     int debugFork = 0;
@@ -963,7 +990,7 @@ int main(int argc, char *argv[]) {
         { "help",           false, nullptr,     'h' },
         { "debug-fork",     false, &debugFork,  1   },
         { "version",        false, nullptr,     'v' },
-        { "wsl-launcher",   true,  nullptr,     'l' },
+        { "distro-guid",    true,  nullptr,     'd' },
         { nullptr,          false, nullptr,     0   },
     };
     while ((c = getopt_long(argc, argv, "+e:C:tT", kOptionTable, nullptr)) != -1) {
@@ -1006,10 +1033,10 @@ int main(int argc, char *argv[]) {
             case 'v':
                 printf("wslbridge " STRINGIFY(WSLBRIDGE_VERSION) "\n");
                 exit(0);
-            case 'l':
-                wslLauncherArg = optarg;
-                if (wslLauncherArg.empty()) {
-                    fatal("error: the --wsl-launcher option requires a non-empty string argument");
+            case 'd':
+                distroGuid = canonicalGuid(optarg);
+                if (distroGuid.empty()) {
+                    fatal("error: the --distro-guid argument '%s' is invalid", optarg);
                 }
                 break;
             default:
@@ -1055,15 +1082,12 @@ int main(int argc, char *argv[]) {
         errorSocket = std::unique_ptr<Socket>(new Socket);
     }
 
-    std::wstring bashPath;
-    if (wslLauncherArg.empty()) {
-        bashPath = findSystemProgram(L"bash.exe");
+    const bool useWslExe = !distroGuid.empty();
+    std::wstring exePath;
+    if (useWslExe) {
+        exePath = findSystemProgram(L"wsl.exe");
     } else {
-        bashPath = mbsToWcs(wslLauncherArg);
-        if (!pathExists(bashPath)) {
-            fatal("error: --wsl-launcher argument '%s' does not exist",
-                wslLauncherArg.c_str());
-        }
+        exePath = findSystemProgram(L"bash.exe");
     }
     const auto backendPathInfo = normalizePath(findBackendProgram());
     const auto backendPathWin = backendPathInfo.first;
@@ -1126,9 +1150,16 @@ int main(int argc, char *argv[]) {
 
     std::wstring cmdLine;
     cmdLine.append(L"\"");
-    cmdLine.append(bashPath);
-    cmdLine.append(L"\" -c ");
-    appendBashArg(cmdLine, bashCmdLine);
+    cmdLine.append(exePath);
+    cmdLine.append(L"\" ");
+    if (useWslExe) {
+        cmdLine.append(mbsToWcs(distroGuid));
+        cmdLine.append(L" ");
+        cmdLine.append(bashCmdLine);
+    } else {
+        cmdLine.append(L"-c ");
+        appendBashArg(cmdLine, bashCmdLine);
+    }
 
     const auto outputPipe = createPipe();
     const auto errorPipe = createPipe();
@@ -1150,7 +1181,7 @@ int main(int argc, char *argv[]) {
     }
 
     PROCESS_INFORMATION pi = {};
-    BOOL success = CreateProcessW(bashPath.c_str(), &cmdLine[0], nullptr, nullptr,
+    BOOL success = CreateProcessW(exePath.c_str(), &cmdLine[0], nullptr, nullptr,
         true,
         debugFork ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW,
         nullptr, nullptr, &sui.StartupInfo, &pi);
