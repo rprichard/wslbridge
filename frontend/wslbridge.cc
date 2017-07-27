@@ -623,6 +623,10 @@ static void usage(const char *prog) {
     printf("  -T            Do not use a pty.\n");
     printf("  -t            Use a pty (as long as stdin is a tty).\n");
     printf("  -t -t         Force a pty (even if stdin is not a tty).\n");
+    printf("  --distro-guid GUID\n");
+    printf("                Uses the WSL distribution identified by GUID.\n");
+    printf("                See HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\n");
+    printf("                for a list of distribution GUIDs.\n");
     exit(0);
 }
 
@@ -938,6 +942,32 @@ static std::string stripTrailing(std::string str) {
     return str;
 }
 
+// Ensure that the GUID is lower-case and surrounded with braces.
+// If the string isn't a valid GUID, then return an empty string.
+static std::string canonicalGuid(std::string guid) {
+    if (guid.size() == 38 && guid[0] == '{' && guid[37] == '}') {
+        // OK
+    } else if (guid.size() == 36) {
+        guid = '{' + guid + '}';
+    } else {
+        return {};
+    }
+    assert(guid.size() == 38);
+    for (size_t i = 1; i <= 36; ++i) {
+        if (i == 9 || i == 14 || i == 19 || i == 24) {
+            if (guid[i] != '-') {
+                return {};
+            }
+        } else {
+            guid[i] = tolower(guid[i]);
+            if (!isxdigit(guid[i])) {
+                return {};
+            }
+        }
+    }
+    return guid;
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -951,6 +981,7 @@ int main(int argc, char *argv[]) {
 
     Environment env;
     std::string spawnCwd;
+    std::string distroGuid;
     enum class TtyRequest { Auto, Yes, No, Force } ttyRequest = TtyRequest::Auto;
 
     int debugFork = 0;
@@ -959,6 +990,7 @@ int main(int argc, char *argv[]) {
         { "help",           false, nullptr,     'h' },
         { "debug-fork",     false, &debugFork,  1   },
         { "version",        false, nullptr,     'v' },
+        { "distro-guid",    true,  nullptr,     'd' },
         { nullptr,          false, nullptr,     0   },
     };
     while ((c = getopt_long(argc, argv, "+e:C:tT", kOptionTable, nullptr)) != -1) {
@@ -1001,6 +1033,12 @@ int main(int argc, char *argv[]) {
             case 'v':
                 printf("wslbridge " STRINGIFY(WSLBRIDGE_VERSION) "\n");
                 exit(0);
+            case 'd':
+                distroGuid = canonicalGuid(optarg);
+                if (distroGuid.empty()) {
+                    fatal("error: the --distro-guid argument '%s' is invalid\n", optarg);
+                }
+                break;
             default:
                 fatal("Try '%s --help' for more information.\n", argv[0]);
         }
@@ -1107,7 +1145,12 @@ int main(int argc, char *argv[]) {
     std::wstring cmdLine;
     cmdLine.append(L"\"");
     cmdLine.append(bashPath);
-    cmdLine.append(L"\" -c ");
+    cmdLine.append(L"\"");
+    if (!distroGuid.empty()) {
+        cmdLine.append(L" ");
+        cmdLine.append(mbsToWcs(distroGuid));
+    }
+    cmdLine.append(L" -c ");
     appendBashArg(cmdLine, bashCmdLine);
 
     const auto outputPipe = createPipe();
