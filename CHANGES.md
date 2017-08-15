@@ -1,3 +1,10 @@
+# Version 0.2.4 (2017-08-14)
+
+Changes since 0.2.3
+
+ * Added a --distro-guid option that allows selecting which WSL Linux
+   distribution to use.
+
 # Version 0.2.3 (2017-06-30)
 
 Changes since 0.2.2
