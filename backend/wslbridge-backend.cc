@@ -6,6 +6,7 @@
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <pty.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -67,6 +68,7 @@ struct ChildParams {
     int cols = -1;
     int rows = -1;
     std::vector<char*> env;
+    std::string prog;
     std::vector<char*> argv;
     std::string cwd;
 };
@@ -200,7 +202,7 @@ static Child spawnChild(const ChildParams &params) {
                 childFailed(SpawnError::Type::ChdirFailed, errno);
             }
         }
-        execvp(params.argv[0], params.argv.data());
+        execvp(params.prog.c_str(), params.argv.data());
         childFailed(SpawnError::Type::ExecFailed, errno);
     }
 
@@ -508,6 +510,7 @@ int main(int argc, char *argv[]) {
     int windowThreshold = -1;
     ChildParams childParams;
     int ptyMode = -1;
+    bool loginMode = false;
 
     const struct option kOptionTable[] = {
         { "pty",            false, &ptyMode,    1 },
@@ -520,7 +523,7 @@ int main(int argc, char *argv[]) {
     };
 
     int ch = 0;
-    while ((ch = getopt_long(argc, argv, "+3:0:1:2:k:c:r:w:t:e:C:", kOptionTable, nullptr)) != -1) {
+    while ((ch = getopt_long(argc, argv, "+3:0:1:2:k:c:r:w:t:e:C:l", kOptionTable, nullptr)) != -1) {
         switch (ch) {
             case 0:
                 // This is returned for the two long options.  getopt_long
@@ -537,6 +540,7 @@ int main(int argc, char *argv[]) {
             case 't': windowThreshold = atoi(optarg); break;
             case 'e': childParams.env.push_back(strdup(optarg)); break;
             case 'C': childParams.cwd = optarg; break;
+            case 'l': loginMode = true; break;
             case 'v':
                 printf("wslbridge-backend " STRINGIFY(WSLBRIDGE_VERSION) "\n");
                 exit(0);
@@ -548,7 +552,27 @@ int main(int argc, char *argv[]) {
         childParams.argv.push_back(argv[i]);
     }
     if (childParams.argv.empty()) {
-        fatal("error: no command line given\n");
+        const char *shell = "/bin/sh";
+        struct passwd *pw = getpwuid(getuid());
+        if (pw == nullptr) {
+            perror("error: getpwuid failed");
+        } else if (pw->pw_shell == nullptr) {
+            fprintf(stderr, "error: getpwuid(...)->pw_shell is NULL\n");
+        } else {
+            shell = pw->pw_shell;
+        }
+        childParams.argv.push_back(strdup(shell));
+    }
+    // XXX: Replace char* args/envstrings with std::string?
+    childParams.prog = childParams.argv[0];
+    if (loginMode) {
+        std::string argv0 = childParams.argv[0];
+        const auto pos = argv0.find_last_of('/');
+        if (pos != std::string::npos) {
+            argv0 = argv0.substr(pos + 1);
+        }
+        argv0 = '-' + argv0;
+        childParams.argv[0] = strdup(argv0.c_str());
     }
     childParams.argv.push_back(nullptr);
 
@@ -598,7 +622,7 @@ int main(int argc, char *argv[]) {
 
     mainLoop(childParams.usePty, controlSocket,
              inputSocket, outputSocket, errorSocket,
-             childParams.argv[0], child, windowParams);
+             childParams.prog.c_str(), child, windowParams);
 
     return 0;
 }

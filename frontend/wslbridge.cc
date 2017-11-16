@@ -619,6 +619,8 @@ static void usage(const char *prog) {
     printf("                An initial '~' indicates the WSL home directory.\n");
     printf("  -e VAR        Copies VAR into the WSL environment.\n");
     printf("  -e VAR=VAL    Sets VAR to VAL in the WSL environment.\n");
+    printf("  -l            Start a login shell.\n");
+    printf("  --no-login    Do not start a login shell.\n");
     printf("  -T            Do not use a pty.\n");
     printf("  -t            Use a pty (as long as stdin is a tty).\n");
     printf("  -t -t         Force a pty (even if stdin is not a tty).\n");
@@ -982,17 +984,22 @@ int main(int argc, char *argv[]) {
     std::string spawnCwd;
     std::string distroGuid;
     enum class TtyRequest { Auto, Yes, No, Force } ttyRequest = TtyRequest::Auto;
+    enum class LoginMode { Auto, Yes, No } loginMode = LoginMode::Auto;
 
     int debugFork = 0;
     int c = 0;
+    if (argv[0][0] == '-') {
+        loginMode = LoginMode::Yes;
+    }
     const struct option kOptionTable[] = {
         { "help",           false, nullptr,     'h' },
         { "debug-fork",     false, &debugFork,  1   },
         { "version",        false, nullptr,     'v' },
         { "distro-guid",    true,  nullptr,     'd' },
+        { "no-login",       false, nullptr,     'L' },
         { nullptr,          false, nullptr,     0   },
     };
-    while ((c = getopt_long(argc, argv, "+e:C:tT", kOptionTable, nullptr)) != -1) {
+    while ((c = getopt_long(argc, argv, "+e:C:tTl", kOptionTable, nullptr)) != -1) {
         switch (c) {
             case 0:
                 // Ignore long option.
@@ -1038,14 +1045,23 @@ int main(int argc, char *argv[]) {
                     fatal("error: the --distro-guid argument '%s' is invalid\n", optarg);
                 }
                 break;
+            case 'l':
+                loginMode = LoginMode::Yes;
+                break;
+            case 'L':
+                loginMode = LoginMode::No;
+                break;
             default:
                 fatal("Try '%s --help' for more information.\n", argv[0]);
         }
     }
 
     const bool hasCommand = optind < argc;
+    if (loginMode == LoginMode::Auto) {
+        loginMode = hasCommand ? LoginMode::No : LoginMode::Yes;
+    }
     if (ttyRequest == TtyRequest::Auto) {
-        ttyRequest = hasCommand ? TtyRequest::No : TtyRequest::Yes;
+        ttyRequest = loginMode == LoginMode::No ? TtyRequest::No : TtyRequest::Yes;
     }
     if (ttyRequest == TtyRequest::Yes && !isatty(STDIN_FILENO)) {
         fprintf(stderr, "Pseudo-terminal will not be allocated because stdin is not a terminal.\n");
@@ -1126,6 +1142,9 @@ int main(int argc, char *argv[]) {
     assert(iRet > 0);
     bashCmdLine.append(buffer.data());
 
+    if (loginMode == LoginMode::Yes) {
+        appendBashArg(bashCmdLine, L"-l");
+    }
     for (const auto &envPair : env.pairs()) {
         appendBashArg(bashCmdLine, L"-e" + envPair.first + L"=" + envPair.second);
     }
@@ -1133,14 +1152,8 @@ int main(int argc, char *argv[]) {
         appendBashArg(bashCmdLine, L"-C" + mbsToWcs(spawnCwd));
     }
     appendBashArg(bashCmdLine, L"--");
-
-    if (optind == argc) {
-        // No command-line specified.  Use a default one.
-        appendBashArg(bashCmdLine, L"/bin/bash");
-    } else {
-        for (int i = optind; i < argc; ++i) {
-            appendBashArg(bashCmdLine, mbsToWcs(argv[i]));
-        }
+    for (int i = optind; i < argc; ++i) {
+        appendBashArg(bashCmdLine, mbsToWcs(argv[i]));
     }
 
     std::wstring cmdLine;
