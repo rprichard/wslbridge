@@ -287,7 +287,6 @@ static TerminalState g_terminalState;
 
 struct IoLoop {
     std::string spawnCwd;
-    std::string spawnProgName;
     bool usePty = false;
     std::mutex mutex;
     bool ioFinished = false;
@@ -301,9 +300,10 @@ static void fatalConnectionBroken() {
 }
 
 static void writePacket(IoLoop &ioloop, const Packet &p) {
+    assert(p.size >= sizeof(p));
     std::lock_guard<std::mutex> lock(ioloop.mutex);
     if (!writeAllRestarting(ioloop.controlSocketFd,
-            reinterpret_cast<const char*>(&p), sizeof(p))) {
+            reinterpret_cast<const char*>(&p), p.size)) {
         fatalConnectionBroken();
     }
 }
@@ -344,7 +344,7 @@ static void socketToParentThread(IoLoop *ioloop, bool isErrorPipe, int socketFd,
                 // program, so do the same thing.  It doesn't do this for
                 // stderr, though, where the remote process is allowed to block
                 // forever.
-                Packet p = { Packet::Type::CloseStdoutPipe };
+                Packet p = { sizeof(Packet), Packet::Type::CloseStdoutPipe };
                 writePacket(*ioloop, p);
             }
             shutdown(socketFd, SHUT_RDWR);
@@ -352,7 +352,7 @@ static void socketToParentThread(IoLoop *ioloop, bool isErrorPipe, int socketFd,
         }
         bytesWritten += amt1;
         if (bytesWritten >= kOutputWindowSize / 2) {
-            Packet p = { Packet::Type::IncreaseWindow };
+            Packet p = { sizeof(Packet), Packet::Type::IncreaseWindow };
             p.u.window.amount = bytesWritten;
             p.u.window.isErrorPipe = isErrorPipe;
             writePacket(*ioloop, p);
@@ -371,6 +371,7 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
             break;
         }
         case Packet::Type::SpawnFailed: {
+            const PacketSpawnFailed &psf = reinterpret_cast<const PacketSpawnFailed&>(p);
             std::string msg;
             switch (p.u.spawnError.type) {
                 case SpawnError::Type::ForkPtyFailed:
@@ -380,7 +381,7 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
                     msg = "error: could not chdir to '" + ioloop->spawnCwd + "': ";
                     break;
                 case SpawnError::Type::ExecFailed:
-                    msg = "error: could not exec '" + ioloop->spawnProgName + "': ";
+                    msg = "error: could not exec '" + std::string(psf.exe) + "': ";
                     break;
                 default:
                     assert(false && "Unhandled SpawnError type");
@@ -397,13 +398,11 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
 }
 
 static void mainLoop(const std::string &spawnCwd,
-                     const std::string &spawnProgName,
                      bool usePty, int controlSocketFd,
                      int inputSocketFd, int outputSocketFd, int errorSocketFd,
                      TermSize termSize) {
     IoLoop ioloop;
     ioloop.spawnCwd = spawnCwd;
-    ioloop.spawnProgName = spawnProgName;
     ioloop.usePty = usePty;
     ioloop.controlSocketFd = controlSocketFd;
     std::thread p2s(parentToSocketThread, inputSocketFd);
@@ -421,7 +420,7 @@ static void mainLoop(const std::string &spawnCwd,
         g_wakeupFd->wait();
         const auto newSize = terminalSize();
         if (newSize != termSize) {
-            Packet p = { Packet::Type::SetSize };
+            Packet p = { sizeof(Packet), Packet::Type::SetSize };
             p.u.termSize = termSize = newSize;
             writePacket(ioloop, p);
         }
@@ -1135,13 +1134,10 @@ int main(int argc, char *argv[]) {
     }
     appendBashArg(bashCmdLine, L"--");
 
-    std::string spawnProgName;
     if (optind == argc) {
         // No command-line specified.  Use a default one.
-        spawnProgName = "/bin/bash";
         appendBashArg(bashCmdLine, L"/bin/bash");
     } else {
-        spawnProgName = argv[optind];
         for (int i = optind; i < argc; ++i) {
             appendBashArg(bashCmdLine, mbsToWcs(argv[i]));
         }
@@ -1256,7 +1252,7 @@ int main(int argc, char *argv[]) {
 
     backendStarted = true;
 
-    mainLoop(spawnCwd, spawnProgName,
+    mainLoop(spawnCwd,
              usePty, controlSocketC,
              inputSocketC, outputSocketC, errorSocketC,
              initialSize);

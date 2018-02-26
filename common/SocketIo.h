@@ -86,6 +86,7 @@ BridgedError bridgedError(int err);
 std::string errorString(BridgedError err);
 
 struct Packet {
+    uint32_t size;
     enum class Type : int32_t {
         SetSize,
         IncreaseWindow,
@@ -102,6 +103,10 @@ struct Packet {
         int32_t exitStatus;
         SpawnError spawnError;
     } u;
+};
+
+struct PacketSpawnFailed : Packet {
+    char exe[1024];
 };
 
 class WakeupFd {
@@ -128,24 +133,23 @@ private:
 
 template <typename T, void packetHandlerFunc(T*, const Packet&), void readFailure()>
 void readControlSocketThread(int controlSocketFd, T *userObj) {
-    std::array<Packet, 256> buf;
-    char *const bufRaw = reinterpret_cast<char*>(&buf);
-    size_t accum = 0;
+    union {
+        Packet base;
+        PacketSpawnFailed spawnFailed;
+    } packet = {};
     while (true) {
-        const ssize_t amt = readRestarting(controlSocketFd,
-                                           &bufRaw[accum],
-                                           sizeof(buf) - accum);
-        if (amt <= 0) {
+        if (!readAllRestarting(controlSocketFd, &packet.base,
+                               sizeof(packet.base))) {
             readFailure();
         }
-        accum += amt;
-        assert(accum <= sizeof(buf));
-        const size_t fullPacketCount = accum / sizeof(Packet);
-        for (size_t i = 0; i < fullPacketCount; ++i) {
-            packetHandlerFunc(userObj, buf[i]);
+        if (packet.base.size < sizeof(Packet) ||
+                packet.base.size > sizeof(packet)) {
+            readFailure();
         }
-        const size_t fullPacketBytes = fullPacketCount * sizeof(Packet);
-        accum -= fullPacketBytes;
-        memmove(&buf[0], &buf[fullPacketCount], accum);
+        if (!readAllRestarting(controlSocketFd, &packet.base + 1,
+                               packet.base.size - sizeof(packet.base))) {
+            readFailure();
+        }
+        packetHandlerFunc(userObj, packet.base);
     }
 }

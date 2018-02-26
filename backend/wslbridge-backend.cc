@@ -272,8 +272,9 @@ static void revokeFd(int fd) {
 }
 
 static void writePacket(int controlSocketFd, const Packet &p) {
+    assert(p.size >= sizeof(p));
     if (!writeAllRestarting(controlSocketFd,
-            reinterpret_cast<const char*>(&p), sizeof(p))) {
+            reinterpret_cast<const char*>(&p), p.size)) {
         connectionBrokenAbort();
     }
 }
@@ -388,7 +389,7 @@ static void handlePacket(IoLoop *ioloop, const Packet &p) {
 
 static void mainLoop(bool usePty, int controlSocketFd,
                      int inputSocketFd, int outputSocketFd, int errorSocketFd,
-                     Child child, WindowParams windowParams) {
+                     const char *exe, Child child, WindowParams windowParams) {
     if (child.spawnError.type == SpawnError::Type::Success) {
         IoLoop ioloop;
         ioloop.usePty = usePty;
@@ -429,7 +430,7 @@ static void mainLoop(bool usePty, int controlSocketFd,
             // no idea whether this makes sense.
             exitStatus = 1;
         }
-        Packet p = { Packet::Type::ChildExitStatus };
+        Packet p = { sizeof(Packet), Packet::Type::ChildExitStatus };
         p.u.exitStatus = exitStatus;
         writePacket(controlSocketFd, p);
 
@@ -454,8 +455,11 @@ static void mainLoop(bool usePty, int controlSocketFd,
         c2s.join();
         if (ec2s) { ec2s->join(); }
     } else {
-        Packet p = { Packet::Type::SpawnFailed };
+        PacketSpawnFailed p = {};
+        p.size = sizeof(p);
+        p.type = Packet::Type::SpawnFailed;
         p.u.spawnError = child.spawnError;
+        snprintf(p.exe, sizeof(p.exe), "%s", exe);
         writePacket(controlSocketFd, p);
 
         // Keep the backend alive until the control socket closes.
@@ -594,7 +598,7 @@ int main(int argc, char *argv[]) {
 
     mainLoop(childParams.usePty, controlSocket,
              inputSocket, outputSocket, errorSocket,
-             child, windowParams);
+             childParams.argv[0], child, windowParams);
 
     return 0;
 }
