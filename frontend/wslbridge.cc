@@ -484,6 +484,18 @@ static std::wstring findBackendProgram() {
     return ret;
 }
 
+static std::wstring getBackendPath(char* cPath) {
+    wchar_t path[MAX_PATH];
+    mbstowcs(path, cPath, MAX_PATH);
+    std::wstring progDir = std::wstring(path);
+    std::wstring ret = progDir + (L"\\" BACKEND_PROGRAM);
+    if (!pathExists(ret)) {
+        fatal("error: '%s' backend program is missing\n",
+            wcsToMbs(ret).c_str());
+    }
+    return ret;
+}
+
 static wchar_t lowerDrive(wchar_t ch) {
     if (ch >= L'a' && ch <= L'z') {
         return ch;
@@ -620,6 +632,7 @@ static void usage(const char *prog) {
     printf("                An initial '~' indicates the WSL home directory.\n");
     printf("  -e VAR        Copies VAR into the WSL environment.\n");
     printf("  -e VAR=VAL    Sets VAR to VAL in the WSL environment.\n");
+    printf("  -p path       Path for wslbridge-backend.\n");
     printf("  -T            Do not use a pty.\n");
     printf("  -t            Use a pty (as long as stdin is a tty).\n");
     printf("  -t -t         Force a pty (even if stdin is not a tty).\n");
@@ -981,6 +994,7 @@ int main(int argc, char *argv[]) {
 
     Environment env;
     std::string spawnCwd;
+    auto backendPathInfo = normalizePath(findBackendProgram());;
     std::string distroGuid;
     enum class TtyRequest { Auto, Yes, No, Force } ttyRequest = TtyRequest::Auto;
 
@@ -993,7 +1007,7 @@ int main(int argc, char *argv[]) {
         { "distro-guid",    true,  nullptr,     'd' },
         { nullptr,          false, nullptr,     0   },
     };
-    while ((c = getopt_long(argc, argv, "+e:C:tT", kOptionTable, nullptr)) != -1) {
+    while ((c = getopt_long(argc, argv, "+e:C:p:tT", kOptionTable, nullptr)) != -1) {
         switch (c) {
             case 0:
                 // Ignore long option.
@@ -1019,6 +1033,11 @@ int main(int argc, char *argv[]) {
                 break;
             case 'h':
                 usage(argv[0]);
+                break;
+            case 'p':
+                if(optarg) {
+                    backendPathInfo = normalizePath(getBackendPath(optarg));
+                }
                 break;
             case 't':
                 if (ttyRequest == TtyRequest::Yes) {
@@ -1083,7 +1102,7 @@ int main(int argc, char *argv[]) {
     }
 
     const auto bashPath = findSystemProgram(L"bash.exe");
-    const auto backendPathInfo = normalizePath(findBackendProgram());
+    //const auto backendPathInfo = normalizePath(findBackendProgram());
     const auto backendPathWin = backendPathInfo.first;
     const auto fsname = backendPathInfo.second;
     const auto backendPathWsl = convertPathToWsl(backendPathWin);
