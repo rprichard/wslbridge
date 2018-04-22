@@ -476,7 +476,13 @@ static std::wstring getModuleFileName(HMODULE module) {
 static std::wstring findBackendProgram(const std::string &customBackendPath) {
     std::wstring ret;
     if (!customBackendPath.empty()) {
-        ret = mbsToWcs(customBackendPath);
+        char *winPath = static_cast<char*>(
+            cygwin_create_path(CCP_POSIX_TO_WIN_A, customBackendPath.c_str()));
+        if (winPath == nullptr) {
+            fatalPerror(("error: bad path: '" + customBackendPath + "'").c_str());
+        }
+        ret = mbsToWcs(winPath);
+        free(winPath);
     } else {
         const auto progDir = dirname(getModuleFileName(getCurrentModule()));
         ret = progDir + (L"\\" BACKEND_PROGRAM);
