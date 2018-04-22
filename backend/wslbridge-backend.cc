@@ -486,11 +486,9 @@ void optionNotAllowed(const char *opt, const char *why, const T &val, const T &u
 
 static void frontendVersionCheck(const char *frontendVersion) {
     if (strcmp(frontendVersion, STRINGIFY(WSLBRIDGE_VERSION)) != 0) {
-        fprintf(stderr,
-                "error: wslbridge frontend-backend version mismatch"
-                " (frontend is version '%s', backend is version '%s')\n",
-                frontendVersion, STRINGIFY(WSLBRIDGE_VERSION));
-        exit(1);
+        fatal("error: wslbridge frontend-backend version mismatch"
+              " (frontend is version '%s', backend is version '%s')\n",
+              frontendVersion, STRINGIFY(WSLBRIDGE_VERSION));
     }
 }
 
@@ -576,9 +574,9 @@ int main(int argc, char *argv[]) {
         const char *shell = "/bin/sh";
         struct passwd *pw = getpwuid(getuid());
         if (pw == nullptr) {
-            perror("error: getpwuid failed");
+            fatalPerror("error: getpwuid failed");
         } else if (pw->pw_shell == nullptr) {
-            fprintf(stderr, "error: getpwuid(...)->pw_shell is NULL\n");
+            fatal("error: getpwuid(...)->pw_shell is NULL\n");
         } else {
             shell = pw->pw_shell;
         }
