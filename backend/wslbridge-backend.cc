@@ -484,6 +484,16 @@ void optionNotAllowed(const char *opt, const char *why, const T &val, const T &u
     }
 }
 
+static void frontendVersionCheck(const char *frontendVersion) {
+    if (strcmp(frontendVersion, STRINGIFY(WSLBRIDGE_VERSION)) != 0) {
+        fprintf(stderr,
+                "error: wslbridge frontend-backend version mismatch"
+                " (frontend is version '%s', backend is version '%s')\n",
+                frontendVersion, STRINGIFY(WSLBRIDGE_VERSION));
+        exit(1);
+    }
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -519,10 +529,12 @@ int main(int argc, char *argv[]) {
         // just to discard it.
         { "debug-fork",     false, nullptr,     0 },
         { "version",        false, nullptr,     'v' },
+        { "check-version",  true,  nullptr,     'V' },
         { nullptr,          false, nullptr,     0 },
     };
 
     int ch = 0;
+    bool versionChecked = false;
     while ((ch = getopt_long(argc, argv, "+3:0:1:2:k:c:r:w:t:e:C:l", kOptionTable, nullptr)) != -1) {
         switch (ch) {
             case 0:
@@ -544,9 +556,18 @@ int main(int argc, char *argv[]) {
             case 'v':
                 printf("wslbridge-backend " STRINGIFY(WSLBRIDGE_VERSION) "\n");
                 exit(0);
+            case 'V':
+                // Do the version check early before we choke on an unexpected
+                // argument from a mismatched frontend.
+                frontendVersionCheck(optarg);
+                versionChecked = true;
+                break;
             default:
                 exit(1);
         }
+    }
+    if (!versionChecked) {
+        frontendVersionCheck("<old>"); // The frontend predates the version-checking.
     }
     for (int i = optind; i < argc; ++i) {
         childParams.argv.push_back(argv[i]);

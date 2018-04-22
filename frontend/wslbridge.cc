@@ -1117,6 +1117,8 @@ int main(int argc, char *argv[]) {
         appendBashArg(bashCmdLine, L"--debug-fork");
     }
 
+    appendBashArg(bashCmdLine, L"--check-version=" STRINGIFY(WSLBRIDGE_VERSION));
+
     std::array<wchar_t, 1024> buffer;
     int iRet = swprintf(buffer.data(), buffer.size(),
                         L" -3%d -0%d -1%d -k%s -w%d -t%d",
