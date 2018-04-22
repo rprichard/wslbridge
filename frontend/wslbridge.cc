@@ -473,9 +473,14 @@ static std::wstring getModuleFileName(HMODULE module) {
     return std::wstring(path);
 }
 
-static std::wstring findBackendProgram() {
-    std::wstring progDir = dirname(getModuleFileName(getCurrentModule()));
-    std::wstring ret = progDir + (L"\\" BACKEND_PROGRAM);
+static std::wstring findBackendProgram(const std::string &customBackendPath) {
+    std::wstring ret;
+    if (!customBackendPath.empty()) {
+        ret = mbsToWcs(customBackendPath);
+    } else {
+        const auto progDir = dirname(getModuleFileName(getCurrentModule()));
+        ret = progDir + (L"\\" BACKEND_PROGRAM);
+    }
     if (!pathExists(ret)) {
         fatal("error: '%s' backend program is missing\n",
             wcsToMbs(ret).c_str());
@@ -628,6 +633,9 @@ static void usage(const char *prog) {
     printf("                Uses the WSL distribution identified by GUID.\n");
     printf("                See HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\n");
     printf("                for a list of distribution GUIDs.\n");
+    printf("  --backend BACKEND\n");
+    printf("                Overrides the default path to wslbridge-backend. BACKEND is a\n");
+    printf("                Cygwin-style path (not a WSL path).\n");
     exit(0);
 }
 
@@ -983,6 +991,7 @@ int main(int argc, char *argv[]) {
     Environment env;
     std::string spawnCwd;
     std::string distroGuid;
+    std::string customBackendPath;
     enum class TtyRequest { Auto, Yes, No, Force } ttyRequest = TtyRequest::Auto;
     enum class LoginMode { Auto, Yes, No } loginMode = LoginMode::Auto;
 
@@ -997,6 +1006,7 @@ int main(int argc, char *argv[]) {
         { "version",        false, nullptr,     'v' },
         { "distro-guid",    true,  nullptr,     'd' },
         { "no-login",       false, nullptr,     'L' },
+        { "backend",        true,  nullptr,     'b' },
         { nullptr,          false, nullptr,     0   },
     };
     while ((c = getopt_long(argc, argv, "+e:C:tTl", kOptionTable, nullptr)) != -1) {
@@ -1051,6 +1061,12 @@ int main(int argc, char *argv[]) {
             case 'L':
                 loginMode = LoginMode::No;
                 break;
+            case 'b':
+                customBackendPath = optarg;
+                if (customBackendPath.empty()) {
+                    fatal("error: the --backend option requires a non-empty string argument");
+                }
+                break;
             default:
                 fatal("Try '%s --help' for more information.\n", argv[0]);
         }
@@ -1098,7 +1114,7 @@ int main(int argc, char *argv[]) {
     }
 
     const auto bashPath = findSystemProgram(L"bash.exe");
-    const auto backendPathInfo = normalizePath(findBackendProgram());
+    const auto backendPathInfo = normalizePath(findBackendProgram(customBackendPath));
     const auto backendPathWin = backendPathInfo.first;
     const auto fsname = backendPathInfo.second;
     const auto backendPathWsl = convertPathToWsl(backendPathWin);
