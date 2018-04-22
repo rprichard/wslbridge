@@ -506,7 +506,7 @@ normalizePath(const std::wstring &path) {
         while (true) {
             const auto sz = GetFinalPathNameByHandleW(h, &ret[0], ret.size(), 0);
             if (sz == 0) {
-                fatal("error: GetFinalPathNameByHandle failed on '%s'",
+                fatal("error: GetFinalPathNameByHandle failed on '%s'\n",
                     wcsToMbs(path).c_str());
             } else if (sz < ret.size()) {
                 ret.resize(sz);
@@ -524,7 +524,7 @@ normalizePath(const std::wstring &path) {
         nullptr,
         OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        fatal("error: could not open '%s'", wcsToMbs(path).c_str());
+        fatal("error: could not open '%s'\n", wcsToMbs(path).c_str());
     }
     auto npath = getFinalPathName(h);
     std::array<wchar_t, MAX_PATH + 1> fsname;
@@ -1030,7 +1030,7 @@ int main(int argc, char *argv[]) {
             case 'C':
                 spawnCwd = optarg;
                 if (spawnCwd.empty()) {
-                    fatal("error: the -C option requires a non-empty string argument");
+                    fatal("error: the -C option requires a non-empty string argument\n");
                 }
                 break;
             case 'h':
@@ -1064,7 +1064,7 @@ int main(int argc, char *argv[]) {
             case 'b':
                 customBackendPath = optarg;
                 if (customBackendPath.empty()) {
-                    fatal("error: the --backend option requires a non-empty string argument");
+                    fatal("error: the --backend option requires a non-empty string argument\n");
                 }
                 break;
             default:
