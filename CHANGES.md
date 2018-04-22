@@ -1,3 +1,21 @@
+# Version 0.2.5 (upcoming version)
+
+ * When available, use `wslpath` to find the WSL path to `wslbridge-backend`
+   rather than assume it is available on a `/mnt/<drv>` mount. Fixes a problem
+   with custom mounts in `/etc/wsl.conf`.
+   [#22](https://github.com/rprichard/wslbridge/issues/22)
+
+ * By default, start the user's configured shell rather than assume it is
+   `/bin/bash`, and invoke it in login mode (i.e. prefix argv[0] with a dash).
+   Add `-l` (and `--no-login`) options to allow overriding the default login
+   shell. (`wslbridge -l zsh` and `wslbridge -t zsh -l` will both create a
+   login shell with a pty, but the first command does so using a `-zsh`
+   argv[0].)
+   [#18](https://github.com/rprichard/wslbridge/issues/18)
+
+ * Added a --backend option to specify a custom path to wslbridge-backend.
+   [#23](https://github.com/rprichard/wslbridge/issues/23)
+
 # Version 0.2.4 (2017-08-14)
 
 Changes since 0.2.3
