@@ -1,0 +1,6 @@
+build_script:
+ - C:\Python36-x64\python.exe dist\cygwin-prebuilts\make-cygwin-prebuilts.py
+ - C:\Python36-x64\python.exe dist\cygwin-prebuilts\make-msys2-prebuilts.py
+
+artifacts:
+ - path: out\artifact\*.7z
