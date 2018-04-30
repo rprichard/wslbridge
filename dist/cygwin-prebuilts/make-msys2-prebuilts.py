@@ -1,12 +1,13 @@
 #!python3
+import os
+import sys
+sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import util
 
 import hashlib
-import os
 import re
 import shutil
 import subprocess
-import sys
 import urllib
 
 import dllversion
@@ -27,11 +28,8 @@ def checkSha256(path, expected):
             path, expected, actual))
 
 
-# Install https://www.python.org, https://www.7-zip.org. Use Win10 bundled curl.
-(sys.version_info[0:2] >= (3, 6))   or sys.exit('error: script requires Python 3.6 or above')
-sys.platform == 'win32'             or sys.exit('error: script only runs on Windows (no Cygwin/MSYS)')
-shutil.which('7z')                  or sys.exit('error: 7z missing')
-shutil.which('curl')                or sys.exit('error: curl missing')
+shutil.which('7z')      or sys.exit('error: 7z missing')
+shutil.which('curl')    or sys.exit('error: curl missing')
 
 buildDir = os.path.join(projectDir, 'out\\build-msys2')
 artifactDir = os.path.join(projectDir, 'out\\artifact')
@@ -41,8 +39,8 @@ mkdirs(artifactDir)
 
 os.chdir(buildDir)
 
-check_call(['curl', '-O', 'http://repo.msys2.org/distrib/i686/msys2-base-i686-20161025.tar.xz'])
-check_call(['curl', '-O', 'http://repo.msys2.org/distrib/x86_64/msys2-base-x86_64-20161025.tar.xz'])
+check_call(['curl', '-fL', '-O', 'http://repo.msys2.org/distrib/i686/msys2-base-i686-20161025.tar.xz'])
+check_call(['curl', '-fL', '-O', 'http://repo.msys2.org/distrib/x86_64/msys2-base-x86_64-20161025.tar.xz'])
 checkSha256('msys2-base-i686-20161025.tar.xz',   '8bafd3d52f5a51528a8671c1cae5591b36086d6ea5b1e76e17e390965cf6768f')
 checkSha256('msys2-base-x86_64-20161025.tar.xz', 'bb1f1a0b35b3d96bf9c15092da8ce969a84a134f7b08811292fbc9d84d48c65d')
 
