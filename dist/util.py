@@ -55,4 +55,4 @@ def getGppVer(path):
 
 
 buildTimeStamp = datetime.now().strftime('%Y%m%d')
-projectDir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+projectDir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

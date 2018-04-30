@@ -1,11 +1,12 @@
 #!python3
+import os
+import sys
+sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import util
 
-import os
 import re
 import shutil
 import subprocess
-import sys
 
 import dllversion
 
@@ -14,7 +15,6 @@ from subprocess import check_call
 from util import glob_paths, rmpath, mkdirs, buildTimeStamp, projectDir, getGppVer
 
 
-# Install https://www.7-zip.org. Use Win10 bundled curl.
 shutil.which('7z')      or sys.exit('error: 7z missing')
 shutil.which('curl')    or sys.exit('error: curl missing')
 
@@ -29,7 +29,7 @@ os.chdir(buildDir)
 
 for setup, cygwin in (('setup-x86_64', 'cygwin64'), ('setup-x86', 'cygwin32')):
 
-    check_call(['curl', '-O', 'https://cygwin.com/{}.exe'.format(setup)])
+    check_call(['curl', '-fL', '-O', 'https://cygwin.com/{}.exe'.format(setup)])
 
     check_call([
         abspath('{}.exe'.format(setup)),
