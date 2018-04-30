@@ -72,7 +72,7 @@ for name, arch in (('msys64', 'x86_64'), ('msys32', 'i686')):
 
     good or sys.exit('error: MSYS2 system update never finished')
 
-    cmd = [bashPath, '--login', '-c', 'pacman --noconfirm -S msys/gcc msys/make']
+    cmd = [bashPath, '--login', '-c', 'pacman --noconfirm -S msys/gcc msys/make msys/tar']
     print('Running {} ...'.format(repr(cmd)))
     check_call(cmd)
 
