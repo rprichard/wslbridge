@@ -31,6 +31,9 @@ for platform, binDir, url in [
             ('msys64',   'usr/bin', baseUrl + 'msys64-20180430-dll2.10.0-gcc7.3.0.7z'),
         ]:
 
+    if os.getenv('CYGWIN_VARIANT') and os.getenv('CYGWIN_VARIANT') != platform:
+        continue
+
     print('Building {} ...'.format(platform))
 
     check_call(['curl', '-fL', url, '-o', '{}.7z'.format(platform)])
