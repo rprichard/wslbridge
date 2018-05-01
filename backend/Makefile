@@ -7,3 +7,4 @@ all : ../out/wslbridge-backend
 		-D_GNU_SOURCE \
 		-DWSLBRIDGE_VERSION=$(shell cat ../VERSION.txt) \
 		-Wall -O2 $< ../common/SocketIo.cc -o $@ -lutil -pthread
+	strip $@

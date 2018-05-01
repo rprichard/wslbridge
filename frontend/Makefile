@@ -7,3 +7,4 @@ all : ../out/wslbridge.exe
 		-D_GNU_SOURCE -D_WIN32_WINNT=0x0600 -DUNICODE -D_UNICODE \
 		-DWSLBRIDGE_VERSION=$(shell cat ../VERSION.txt) \
 		-Wall -O2 $< ../common/SocketIo.cc -o $@
+	strip $@
