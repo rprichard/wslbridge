@@ -1,5 +1,12 @@
+environment:
+  matrix:
+    - CYGWIN_VARIANT: cygwin
+    - CYGWIN_VARIANT: cygwin64
+    - CYGWIN_VARIANT: msys32
+    - CYGWIN_VARIANT: msys64
+
 build_script:
- - C:\Python36-x64\python.exe dist\frontend\make-frontend-packages.py
+  - C:\Python36-x64\python.exe dist\frontend\make-frontend-packages.py
 
 artifacts:
- - path: out\artifact\*-frontend.tar.xz
+  - path: out\artifact\*-frontend.tar.xz
