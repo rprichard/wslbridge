@@ -27,7 +27,7 @@ mkdirs(artifactDir)
 
 os.chdir(buildDir)
 
-for setup, cygwin in (('setup-x86_64', 'cygwin64'), ('setup-x86', 'cygwin')):
+for setup, cygwin in (('setup-x86_64', 'cygwin64'), ('setup-x86', 'cygwin32')):
 
     check_call(['curl', '-O', 'https://cygwin.com/{}.exe'.format(setup)])
 
