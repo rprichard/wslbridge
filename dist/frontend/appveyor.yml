@@ -1,6 +1,6 @@
 environment:
   matrix:
-    - CYGWIN_VARIANT: cygwin
+    - CYGWIN_VARIANT: cygwin32
     - CYGWIN_VARIANT: cygwin64
     - CYGWIN_VARIANT: msys32
     - CYGWIN_VARIANT: msys64
