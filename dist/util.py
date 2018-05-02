@@ -1,8 +1,7 @@
 import sys
 
 # Install Python from https://www.python.org.
-(sys.version_info[0:2] >= (3, 6))   or sys.exit('error: script requires Python 3.6 or above')
-sys.platform == 'win32'             or sys.exit('error: script only runs on Windows (no Cygwin/MSYS)')
+(sys.version_info[0:2] >= (3, 5))   or sys.exit('error: script requires Python 3.5 or above')
 
 import os
 import re

@@ -10,6 +10,7 @@ from os.path import abspath, relpath
 from subprocess import check_call
 from util import projectDir, rmpath, mkdirs
 
+sys.platform == 'win32' or sys.exit('error: script only runs on Windows (no Cygwin/MSYS)')
 shutil.which('7z')      or sys.exit('error: 7z missing')
 shutil.which('curl')    or sys.exit('error: curl missing')
 
@@ -39,16 +40,13 @@ for platform, binDir, url in [
     check_call(['curl', '-fL', url, '-o', '{}.7z'.format(platform)])
     check_call(['7z', 'x', '{}.7z'.format(platform)])
 
-    # XXX: There is no 'make clean', so do it inline. There are no intermediate
-    # build files.
-    rmpath(os.path.join(projectDir, 'out', 'wslbridge.exe'))
-
     platformBinDir = abspath(os.path.join(platform, binDir))
-    artifactPath = os.path.join(artifactDir, '{}-frontend.tar.xz'.format(platform))
+    artifactPath = os.path.join(artifactDir, '{}-frontend.tar.gz'.format(platform))
 
     origPATH = os.getenv('PATH')
     os.putenv('PATH', platformBinDir + os.pathsep + origPATH)
-    check_call([os.path.join(platformBinDir, 'make.exe')], cwd=os.path.join(projectDir, 'frontend'))
+    check_call([os.path.join(platformBinDir, 'make.exe'), 'clean'], cwd=os.path.join(projectDir, 'frontend'))
+    check_call([os.path.join(platformBinDir, 'make.exe')],          cwd=os.path.join(projectDir, 'frontend'))
     check_call([os.path.join(platformBinDir, 'tar.exe'), 'cfa',
                 relpath(artifactPath, os.getcwd()).replace('\\', '/'),
                 '-C', '..', 'wslbridge.exe'])

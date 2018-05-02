@@ -28,6 +28,7 @@ def checkSha256(path, expected):
             path, expected, actual))
 
 
+sys.platform == 'win32' or sys.exit('error: script only runs on Windows (no Cygwin/MSYS)')
 shutil.which('7z')      or sys.exit('error: 7z missing')
 shutil.which('curl')    or sys.exit('error: curl missing')
 

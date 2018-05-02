@@ -15,6 +15,7 @@ from subprocess import check_call
 from util import glob_paths, rmpath, mkdirs, buildTimeStamp, projectDir, getGppVer
 
 
+sys.platform == 'win32' or sys.exit('error: script only runs on Windows (no Cygwin/MSYS)')
 shutil.which('7z')      or sys.exit('error: 7z missing')
 shutil.which('curl')    or sys.exit('error: curl missing')
 
