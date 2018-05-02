@@ -75,15 +75,24 @@ for name, arch in (('msys64', 'x86_64'), ('msys32', 'i686')):
     print('Running {} ...'.format(repr(cmd)))
     check_call(cmd)
 
+    # The -p option passed by autorebase.bat doesn't look necessary. It relaxes
+    # the sanity checking to allow more than just ash.exe/dash.exe processes.
+    check_call(['{}/usr/bin/ash.exe'.format(name), '/usr/bin/rebaseall', '-v'])
+
     msysVer = dllversion.fileVersion('{}/usr/bin/msys-2.0.dll'.format(name))
     gppVer = getGppVer('{}/usr/bin/g++.exe'.format(name))
 
     filename = '{}\\{}-{}-dll{}-gcc{}.7z'.format(artifactDir, name, buildTimeStamp, msysVer, gppVer)
     rmpath(filename)
 
+    open(name + '/tmp/.keep', 'wb').close()
+    open(name + '/etc/.keep', 'wb').close()
+
     check_call(['7z', 'a', '-mx=9', filename] + glob_paths([
+        name + '/autorebase.bat',
         name + '/dev',
-        name + '/tmp',
+        name + '/etc/.keep',
+        name + '/tmp/.keep',
         name + '/usr/bin',
         name + '/usr/lib',
         name + '/usr/include',

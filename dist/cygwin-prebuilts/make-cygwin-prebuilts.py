@@ -41,15 +41,20 @@ for setup, cygwin in (('setup-x86_64', 'cygwin64'), ('setup-x86', 'cygwin32')):
         '--no-admin', '--no-desktop', '--no-shortcuts', '--no-startmenu', '--quiet-mode',
     ])
 
+    check_call(['{}/bin/ash.exe'.format(cygwin), '/bin/rebaseall', '-v'])
+
     cygVer = dllversion.fileVersion('{}/bin/cygwin1.dll'.format(cygwin))
     gppVer = getGppVer('{}/bin/g++.exe'.format(cygwin))
 
     filename = '{}\\{}-{}-dll{}-gcc{}.7z'.format(artifactDir, cygwin, buildTimeStamp, cygVer, gppVer)
     rmpath(filename)
 
+    open(cygwin + '/tmp/.keep', 'wb').close()
+
     check_call(['7z', 'a', '-mx=9', filename] + glob_paths([
         cygwin + '/dev',
-        cygwin + '/tmp',
+        cygwin + '/etc/setup',
+        cygwin + '/tmp/.keep',
         cygwin + '/bin',
         cygwin + '/lib',
         cygwin + '/usr/include',
