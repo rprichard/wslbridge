@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-import os
-import sys
-sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import util
 
+import os
 import shutil
+import sys
 
 from os.path import abspath
 from subprocess import check_call

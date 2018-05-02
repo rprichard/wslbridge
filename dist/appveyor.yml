@@ -18,10 +18,10 @@ matrix:
 for:
   - matrix: { only: [ COMPONENT: backend ] }
     build_script:
-      - python3 dist/frontend/make-backend-package.py
+      - python3 dist/make-backend-package.py
   - matrix: { only: [ COMPONENT: frontend ] }
     build_script:
-      - C:\Python35-x64\python.exe dist\frontend\make-frontend-packages.py
+      - C:\Python35-x64\python.exe dist\make-frontend-packages.py
 
 artifacts:
   - path: out\artifact\*.tar.gz
