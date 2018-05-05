@@ -713,14 +713,15 @@ static void appendBashArg(std::wstring &out, const std::wstring &arg) {
             inQuote = newInQuote;
         }
     };
+    enterQuote(true);
     for (auto ch : arg) {
         if (ch == L'\'') {
             enterQuote(false);
             out.append(L"\\'");
+            enterQuote(true);
         } else if (isCharSafe(ch)) {
             out.push_back(ch);
         } else {
-            enterQuote(true);
             out.push_back(ch);
         }
     }
@@ -1129,11 +1130,11 @@ int main(int argc, char *argv[]) {
 
     // Prepare the backend command line.
     std::wstring bashCmdLine;
-    bashCmdLine.append(L"$(if [ \"$(command -v wslpath)\" ]; then wslpath");
+    bashCmdLine.append(L"\"$(if [ \"$(command -v wslpath)\" ]; then wslpath");
     appendBashArg(bashCmdLine, backendPathWin);
     bashCmdLine.append(L" || echo false; else echo");
     appendBashArg(bashCmdLine, backendPathWsl);
-    bashCmdLine.append(L"; fi)");
+    bashCmdLine.append(L"; fi)\"");
 
     if (debugFork) {
         appendBashArg(bashCmdLine, L"--debug-fork");
