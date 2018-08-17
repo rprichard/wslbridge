@@ -572,6 +572,7 @@ int main(int argc, char *argv[]) {
     }
     if (childParams.argv.empty()) {
         const char *shell = "/bin/sh";
+        char *shellEnv;
         struct passwd *pw = getpwuid(getuid());
         if (pw == nullptr) {
             fatalPerror("error: getpwuid failed");
@@ -580,6 +581,10 @@ int main(int argc, char *argv[]) {
         } else {
             shell = pw->pw_shell;
         }
+        if (asprintf(&shellEnv, "SHELL=%s", shell) == -1) {
+            fatal("error: unable to set shellEnv\n");
+        }
+        childParams.env.push_back(shellEnv);
         childParams.argv.push_back(strdup(shell));
     }
     // XXX: Replace char* args/envstrings with std::string?
