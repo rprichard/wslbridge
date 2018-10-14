@@ -22,7 +22,7 @@ mkdirs(artifactDir)
 
 os.chdir(buildDir)
 
-baseUrl = 'https://ci.appveyor.com/api/buildjobs/1qy7umu9penjvdsv/artifacts/out%2Fartifact%2F'
+baseUrl = 'https://github.com/rprichard/wslbridge/raw/wslbridge-cygwin-prebuilts-1.0.7/'
 
 for platform, binDir, url in [
             ('cygwin32', 'bin',     baseUrl + 'cygwin32-20180502-dll2.10.0-gcc6.4.0.7z'),
