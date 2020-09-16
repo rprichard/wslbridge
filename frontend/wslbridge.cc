@@ -728,6 +728,82 @@ static void appendBashArg(std::wstring &out, const std::wstring &arg) {
     enterQuote(false);
 }
 
+static void appendCmdArg(std::wstring &out, const std::wstring &arg){
+    // This function tries to quote `arg` to `out` so that when the logic
+    // mentioned in http://msdn.microsoft.com/en-us/library/17w5ykft.aspx are
+    // applies to `out`, the parsed arguments can correctly recognizes `arg`
+    // as a whole arg with its contents being kept the same.
+    // In other words:
+    // * For every substring in `arg` that matches pattern `\\*\"`, prepend a
+    // `'\\'` for every single character (for most cases in UTF-16 we can assume
+    // a single `wchar_t` code point is a single character, although that's
+    // definitively not true, as UTF-16 does have grapheme clusters) of this
+    // substring. For every other characters in `args`, append this character
+    // as is.
+    // * If `arg` contains a space or a tab, `arg` must be surrounded by a pair
+    // of double quotes when being appended to `out`; if `arg` doesn't contain
+    // spaces and doesn't contain tabs, it doesn't matter if `arg` needs to do
+    // so.
+
+    using size_type = std::wstring::size_type;
+
+    if(arg.empty()){
+        return ;
+    }
+
+    // We unconditionally double-quote args in all situations so we don't need
+    // to check if we need to add double quote back and forth. That would make
+    // generated strings difficult for human to understand, but at least it
+    // preserves the desired semmantics :)
+    out.push_back(L'"');
+
+    size_type curr_idx = 0;
+    while(curr_idx < arg.size()){
+        // TODO: check if this operation is definitively safe, since UTF-16
+        // has grapheme clusters too, which means opertions on code point might
+        // fail just like the UTF-8 case, though such case would be extremely
+        // rare.
+        size_type maybe_escape_token_begin = arg.find_first_of(
+            L"\"\\",
+            curr_idx
+        );
+        if(maybe_escape_token_begin == std::wstring::npos){
+            maybe_escape_token_begin = arg.size();
+        }
+        // extract all normal character tokens and append them to `out`
+        if(curr_idx != maybe_escape_token_begin){
+            out.append(arg, curr_idx, maybe_escape_token_begin - curr_idx);
+            curr_idx = maybe_escape_token_begin;
+        }
+        if(curr_idx == arg.size()){
+            break;
+        }
+
+        // TODO: same grapheme cluster issues need to be checked here too.
+        size_type maybe_escape_token_end = arg.find_first_not_of(L'\\', curr_idx);
+        if(maybe_escape_token_end == std::wstring::npos){
+            out.append(arg, curr_idx, arg.size() - curr_idx);
+            break;
+        }
+        assert(maybe_escape_token_end < arg.size());
+        if(arg[maybe_escape_token_end] != L'"'){
+            out.append(arg, curr_idx, maybe_escape_token_end - curr_idx);
+            curr_idx = maybe_escape_token_end;
+            continue;
+        }
+        out.append((maybe_escape_token_end - curr_idx) * 2 + 1, L'\\');
+        out.push_back(L'"');
+        curr_idx = maybe_escape_token_end + 1;
+        assert(curr_idx <= arg.size());
+        if(curr_idx == arg.size()){
+            break;
+        }
+        continue;
+    }
+
+    out.push_back(L'"');
+}
+
 static std::string errorMessageToString(DWORD err) {
     // Use FormatMessageW rather than FormatMessageA, because we want to use
     // wcstombs to convert to the Cygwin locale, which might not match the
@@ -1190,7 +1266,7 @@ int main(int argc, char *argv[]) {
         cmdLine.append(mbsToWcs(distroGuid));
     }
     cmdLine.append(L" -c ");
-    appendBashArg(cmdLine, bashCmdLine);
+    appendCmdArg(cmdLine, bashCmdLine);
 
     const auto outputPipe = createPipe();
     const auto errorPipe = createPipe();
